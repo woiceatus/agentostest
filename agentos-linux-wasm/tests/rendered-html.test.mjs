@@ -188,8 +188,16 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   assert.equal(auroraExports.aurora_window_count(), 3);
   assert.equal(auroraExports.aurora_is_running(), 1);
   assert.equal(auroraExports.aurora_files_visible(), 1);
-  assert.equal(auroraExports.aurora_active_window(), 2);
+  assert.equal(auroraExports.aurora_term_visible(), 1);
+  assert.equal(auroraExports.aurora_netsurf_visible(), 1);
+  assert.equal(auroraExports.aurora_active_window(), 1); // NetSurf focused on boot
   assert.ok(auroraExports.aurora_files_count() >= 1);
+
+  const netsurfBytes = await readFile(new URL("../public/wasm/netsurf-web.wasm", import.meta.url));
+  const netsurf = (await WebAssembly.instantiate(netsurfBytes, {})).instance.exports;
+  assert.equal(typeof netsurf.netsurf_init, "function");
+  netsurf.netsurf_init(640, 420);
+  assert.equal(netsurf.netsurf_is_running(), 1);
   assert.equal(auroraExports.aurora_topbar_height(), 40);
   assert.equal(auroraExports.aurora_titlebar_height(), 34);
   auroraExports.aurora_map_request(0, 320, 200);

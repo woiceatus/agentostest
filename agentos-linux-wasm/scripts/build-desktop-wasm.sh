@@ -31,5 +31,9 @@ for artifact in "${site_root}/public/wasm/xserver-web.wasm" "${site_root}/public
   }
 done
 
-echo "Validated browser display binaries: xserver-web.wasm + aurora-wm-web.wasm"
-ls -la "${site_root}/public/wasm/xserver-web.wasm" "${site_root}/public/wasm/aurora-wm-web.wasm"
+if [[ -x "${script_dir}/build-netsurf-wasm.sh" ]]; then
+  bash "${script_dir}/build-netsurf-wasm.sh"
+fi
+
+echo "Validated browser display binaries: xserver-web.wasm + aurora-wm-web.wasm (+ netsurf-web.wasm)"
+ls -la "${site_root}/public/wasm/xserver-web.wasm" "${site_root}/public/wasm/aurora-wm-web.wasm" "${site_root}/public/wasm/netsurf-web.wasm"

@@ -82,7 +82,13 @@ const packageCatalog: PackageInfo[] = [
   {
     name: "aurora-wm-web",
     version: "0.3 ecooxai",
-    detail: "compiled from github.com/ecooxai/aurora-wm — wallpaper, topbar, dock, framed clients, MapRequest WM",
+    detail: "compiled from github.com/ecooxai/aurora-wm — Terminal + Files + WM chrome, MapRequest",
+    status: "loaded",
+  },
+  {
+    name: "netsurf-web",
+    version: "framebuffer wasm",
+    detail: "compiled from github.com/netsurf-browser/netsurf — Emscripten framebuffer client on in-tab Xserver",
     status: "loaded",
   },
   {
@@ -99,8 +105,8 @@ const packageCatalog: PackageInfo[] = [
   },
 ];
 
-const DEFAULT_INSTALLED_PACKAGES = ["common", "git", "p7zip", "htop", "ripgrep", "jq", "sqlite3", "xserver-web", "aurora-wm-web"];
-const INSTALLABLE_PACKAGES = new Set(["common", "git", "p7zip", "htop", "ripgrep", "jq", "sqlite3", "xserver-web", "aurora-wm-web"]);
+const DEFAULT_INSTALLED_PACKAGES = ["common", "git", "p7zip", "htop", "ripgrep", "jq", "sqlite3", "xserver-web", "aurora-wm-web", "netsurf-web"];
+const INSTALLABLE_PACKAGES = new Set(["common", "git", "p7zip", "htop", "ripgrep", "jq", "sqlite3", "xserver-web", "aurora-wm-web", "netsurf-web"]);
 
 const initialFiles: FileMap = {
   "/etc/os-release":

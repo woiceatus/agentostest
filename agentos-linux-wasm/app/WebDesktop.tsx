@@ -87,6 +87,35 @@ type AuroraModule = {
   aurora_files_add: WasmCall;
   aurora_files_count: WasmCall;
   aurora_files_visible: WasmCall;
+  aurora_term_show: WasmCall;
+  aurora_term_visible: WasmCall;
+  aurora_term_clear: WasmCall;
+  aurora_term_line_buf: WasmCall;
+  aurora_term_line_cap: WasmCall;
+  aurora_term_add_line: WasmCall;
+  aurora_netsurf_show: WasmCall;
+  aurora_netsurf_visible: WasmCall;
+  aurora_netsurf_index: WasmCall;
+  aurora_term_index: WasmCall;
+};
+
+type NetsurfModule = {
+  memory: WebAssembly.Memory;
+  netsurf_init: WasmCall;
+  netsurf_frame_ptr: WasmCall;
+  netsurf_frame_len: WasmCall;
+  netsurf_width: WasmCall;
+  netsurf_height: WasmCall;
+  netsurf_is_running: WasmCall;
+  netsurf_render: WasmCall;
+  netsurf_address_buf: WasmCall;
+  netsurf_address_cap: WasmCall;
+  netsurf_commit_address: WasmCall;
+  netsurf_commit_title: WasmCall;
+  netsurf_clear_lines: WasmCall;
+  netsurf_line_buf: WasmCall;
+  netsurf_line_cap: WasmCall;
+  netsurf_add_line: WasmCall;
 };
 
 type XserverModule = {
@@ -131,6 +160,7 @@ type X11Runtime = {
   app: X11Client;
   aurora: AuroraModule;
   xserver: XserverModule | null;
+  netsurf: NetsurfModule | null;
   presenter: Presenter;
   animationFrame: number;
   stop: () => void;
@@ -195,8 +225,117 @@ function syncAuroraFiles(aurora: AuroraModule, workspaceFiles: Record<string, st
     );
     aurora.aurora_files_add(nameLen, entry.kind);
   }
-  // Ensure the Files app is mapped/focused like upstream show_folder(..., true).
   aurora.aurora_files_show(1);
+}
+
+function syncAuroraTerminal(aurora: AuroraModule, lines: string[]): void {
+  aurora.aurora_term_clear();
+  for (const line of lines) {
+    const len = writeWasmString(
+      aurora.memory,
+      aurora.aurora_term_line_buf(),
+      aurora.aurora_term_line_cap(),
+      line.slice(0, 90),
+    );
+    aurora.aurora_term_add_line(len);
+  }
+  aurora.aurora_term_show(1);
+}
+
+async function loadNetsurf(contentWidth: number, contentHeight: number): Promise<NetsurfModule | null> {
+  try {
+    const response = await fetch("/wasm/netsurf-web.wasm");
+    if (!response.ok) throw new Error(`NetSurf WASM HTTP ${response.status}`);
+    const bytes = await response.arrayBuffer();
+    const instance = (await WebAssembly.instantiate(bytes, {})).instance;
+    const exports = instance.exports as unknown as Record<string, unknown>;
+    const memory = exports.memory as WebAssembly.Memory | undefined;
+    if (!(memory instanceof WebAssembly.Memory)) throw new Error("NetSurf memory missing");
+    const netsurf: NetsurfModule = {
+      memory,
+      netsurf_init: requiredExport(exports, "netsurf_init"),
+      netsurf_frame_ptr: requiredExport(exports, "netsurf_frame_ptr"),
+      netsurf_frame_len: requiredExport(exports, "netsurf_frame_len"),
+      netsurf_width: requiredExport(exports, "netsurf_width"),
+      netsurf_height: requiredExport(exports, "netsurf_height"),
+      netsurf_is_running: requiredExport(exports, "netsurf_is_running"),
+      netsurf_render: requiredExport(exports, "netsurf_render"),
+      netsurf_address_buf: requiredExport(exports, "netsurf_address_buf"),
+      netsurf_address_cap: requiredExport(exports, "netsurf_address_cap"),
+      netsurf_commit_address: requiredExport(exports, "netsurf_commit_address"),
+      netsurf_commit_title: requiredExport(exports, "netsurf_commit_title"),
+      netsurf_clear_lines: requiredExport(exports, "netsurf_clear_lines"),
+      netsurf_line_buf: requiredExport(exports, "netsurf_line_buf"),
+      netsurf_line_cap: requiredExport(exports, "netsurf_line_cap"),
+      netsurf_add_line: requiredExport(exports, "netsurf_add_line"),
+    };
+    netsurf.netsurf_init(Math.max(320, contentWidth), Math.max(200, contentHeight));
+    return netsurf;
+  } catch {
+    return null;
+  }
+}
+
+function netsurfSetText(netsurf: NetsurfModule, commit: "address" | "title" | "line", value: string): void {
+  const ptr = commit === "line" ? netsurf.netsurf_line_buf() : netsurf.netsurf_address_buf();
+  const cap = commit === "line" ? netsurf.netsurf_line_cap() : netsurf.netsurf_address_cap();
+  const len = writeWasmString(netsurf.memory, ptr, cap, value);
+  if (commit === "address") netsurf.netsurf_commit_address(len);
+  else if (commit === "title") netsurf.netsurf_commit_title(len);
+  else netsurf.netsurf_add_line(len);
+}
+
+async function launchNetsurfPage(netsurf: NetsurfModule, url: string): Promise<void> {
+  netsurfSetText(netsurf, "address", url);
+  netsurfSetText(netsurf, "title", "NetSurf");
+  netsurf.netsurf_clear_lines();
+  const fallback = [
+    "NetSurf",
+    "Small as a mouse, fast as a cheetah, and available for free.",
+    "",
+    `Opened ${url}`,
+    "Compiled with Emscripten for the AgentOS in-tab Xserver.",
+    "Upstream: https://github.com/netsurf-browser/netsurf",
+  ];
+  try {
+    const response = await fetch(url, { mode: "cors" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const html = await response.text();
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    if (titleMatch?.[1]) netsurfSetText(netsurf, "title", titleMatch[1].trim().slice(0, 80));
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const chunks = text.match(/.{1,90}/g)?.slice(0, 18) ?? fallback;
+    for (const line of chunks) netsurfSetText(netsurf, "line", line);
+  } catch {
+    for (const line of fallback) netsurfSetText(netsurf, "line", line);
+  }
+  netsurf.netsurf_render(0);
+}
+
+function blitNetsurfIntoAurora(aurora: AuroraModule, netsurf: NetsurfModule): void {
+  const index = aurora.aurora_netsurf_index();
+  const dx = aurora.aurora_content_x(index);
+  const dy = aurora.aurora_content_y(index);
+  const dw = aurora.aurora_content_width(index);
+  const dh = aurora.aurora_content_height(index);
+  if (dw <= 0 || dh <= 0) return;
+  netsurf.netsurf_render(Math.round(performance.now()) >>> 0);
+  const sw = netsurf.netsurf_width();
+  const sh = netsurf.netsurf_height();
+  const src = new Uint8Array(netsurf.memory.buffer, netsurf.netsurf_frame_ptr(), netsurf.netsurf_frame_len());
+  const dst = new Uint8Array(aurora.memory.buffer, aurora.aurora_frame_ptr(), aurora.aurora_frame_len());
+  const copyW = Math.min(dw, sw);
+  const copyH = Math.min(dh, sh);
+  for (let y = 0; y < copyH; y += 1) {
+    const srcOffset = y * sw * 4;
+    const dstOffset = ((dy + y) * DISPLAY_WIDTH + dx) * 4;
+    dst.set(src.subarray(srcOffset, srcOffset + copyW * 4), dstOffset);
+  }
 }
 
 const x11Api = x11 as unknown as X11Api;
@@ -279,16 +418,26 @@ async function loadAuroraWm(): Promise<{ layout: WindowSpec[]; aurora: AuroraMod
     aurora_files_add: requiredExport(exports, "aurora_files_add"),
     aurora_files_count: requiredExport(exports, "aurora_files_count"),
     aurora_files_visible: requiredExport(exports, "aurora_files_visible"),
+    aurora_term_show: requiredExport(exports, "aurora_term_show"),
+    aurora_term_visible: requiredExport(exports, "aurora_term_visible"),
+    aurora_term_clear: requiredExport(exports, "aurora_term_clear"),
+    aurora_term_line_buf: requiredExport(exports, "aurora_term_line_buf"),
+    aurora_term_line_cap: requiredExport(exports, "aurora_term_line_cap"),
+    aurora_term_add_line: requiredExport(exports, "aurora_term_add_line"),
+    aurora_netsurf_show: requiredExport(exports, "aurora_netsurf_show"),
+    aurora_netsurf_visible: requiredExport(exports, "aurora_netsurf_visible"),
+    aurora_netsurf_index: requiredExport(exports, "aurora_netsurf_index"),
+    aurora_term_index: requiredExport(exports, "aurora_term_index"),
   };
 
   requiredExport(exports, "aurora_init")(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   if (aurora.aurora_is_running() !== 1) throw new Error("Aurora WM failed to enter running state");
 
   const count = requiredExport(exports, "aurora_window_count")();
-  const names = ["terminal", "agent log", "Aurora Files"];
+  const names = ["Aurora Terminal", "NetSurf", "Aurora Files"];
   const palettes = [
-    { background: 0x172f35, accent: 0x73ded2, lines: ["agentOS shell", "xterm PTY connected", "ready for input", "processes: 3"] },
-    { background: 0x18262f, accent: 0x8ebac4, lines: ["Aurora WM", "MapRequest: Aurora Files", "files app running", "ecooxai/aurora-wm"] },
+    { background: 0x18242a, accent: 0x73ded2, lines: ["Aurora Terminal", "ecooxai/aurora-wm", "PTY bridge ready", "$"] },
+    { background: 0xf8fafc, accent: 0x1464a0, lines: ["NetSurf", "framebuffer WASM", "netsurf-browser/netsurf", "auto-start"] },
     { background: 0xf7fcff, accent: 0x4cc5b2, lines: ["/workspace", "Aurora Files", "Places · Workspace", "auto-started with WM"] },
   ];
 
@@ -573,14 +722,38 @@ async function startX11Runtime(
 ): Promise<X11Runtime> {
   onStatus("loading Aurora WM WASM (ecooxai/aurora-wm)…");
   const { layout, aurora } = await loadAuroraWm();
-  // Match upstream WM boot: show_folder / aurora-files is launched with the session.
+  // Boot the same session apps a real Aurora desktop would: Files + Terminal,
+  // plus NetSurf compiled to WASM for the in-tab Xserver.
   syncAuroraFiles(aurora, workspaceFiles, "/workspace");
-  if (aurora.aurora_files_visible() !== 1 || aurora.aurora_files_count() < 1) {
-    throw new Error("Aurora Files failed to start with the WM session");
+  syncAuroraTerminal(aurora, [
+    "Aurora Terminal",
+    "compiled from ecooxai/aurora-wm terminal UI",
+    "session bridge: agentOS browser shell",
+    "$ ls /workspace",
+    ...listWorkspaceEntries(workspaceFiles).map((entry) => entry.name).slice(0, 6),
+    "$ netsurf https://www.netsurf-browser.org/",
+    "launched NetSurf WASM client",
+    "$",
+  ]);
+  aurora.aurora_netsurf_show(1);
+  aurora.aurora_term_show(1);
+  aurora.aurora_files_show(1);
+  if (aurora.aurora_files_visible() !== 1 || aurora.aurora_term_visible() !== 1) {
+    throw new Error("Aurora Terminal/Files failed to start with the WM session");
   }
   aurora.aurora_render(0);
   onWindows(readLayout(aurora, layout));
-  onStatus(`Aurora Files running · ${aurora.aurora_files_count()} items in /workspace`);
+
+  onStatus("loading NetSurf WASM (netsurf-browser/netsurf)…");
+  const netsurfIndex = aurora.aurora_netsurf_index();
+  const netsurf = await loadNetsurf(
+    aurora.aurora_content_width(netsurfIndex),
+    aurora.aurora_content_height(netsurfIndex),
+  );
+  if (netsurf) {
+    await launchNetsurfPage(netsurf, "https://www.netsurf-browser.org/");
+    aurora.aurora_netsurf_show(1);
+  }
 
   onStatus("loading Xserver WASM compositor…");
   const xserver = await loadXserver();
@@ -716,11 +889,12 @@ async function startX11Runtime(
 
   const xserverRunning = xserver?.xserver_is_running() === 1;
   const auroraRunning = aurora.aurora_is_running() === 1;
+  const netsurfRunning = netsurf?.netsurf_is_running() === 1;
   onStatus(
-    auroraRunning && xserverRunning
-      ? "running · Xserver + Aurora WM + Aurora Files · DISPLAY=:0"
+    auroraRunning && netsurfRunning
+      ? `running · Terminal + NetSurf + Files · ${xserverRunning ? "Xserver WASM" : "JS X11"} · DISPLAY=:0`
       : auroraRunning
-        ? "running · Aurora WM + Aurora Files · DISPLAY=:0"
+        ? "running · Aurora Terminal + Files · DISPLAY=:0"
         : "failed · desktop modules did not start",
   );
 
@@ -736,6 +910,7 @@ async function startX11Runtime(
     paintState.lastPaint = now;
     aurora.aurora_tick(now);
     aurora.aurora_render(now);
+    if (netsurf) blitNetsurfIntoAurora(aurora, netsurf);
     if (xserver) {
       syncWindowsToXserver(aurora, xserver, layout.length);
       xserver.xserver_render(now);
@@ -747,6 +922,8 @@ async function startX11Runtime(
     if (stopped) return;
     const now = Math.round(performance.now()) >>> 0;
     paintAurora(now);
+    // Keep NetSurf framebuffer live even between Aurora dirty paints.
+    if (netsurf) blitNetsurfIntoAurora(aurora, netsurf);
     server.compose();
     const byteLength = DISPLAY_WIDTH * DISPLAY_HEIGHT * 4;
     const auroraPixels = new Uint8Array(
@@ -765,6 +942,7 @@ async function startX11Runtime(
     app,
     aurora,
     xserver,
+    netsurf,
     presenter,
     animationFrame,
     stop: () => {
@@ -803,7 +981,7 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
       runtimeRef.current?.stop();
       runtimeRef.current = null;
       onRunningRef.current(false);
-      setStatus("starting Aurora WM + Aurora Files…");
+      setStatus("starting Aurora Terminal + NetSurf + Files…");
       setBackend("initializing");
       const canvas = canvasRef.current;
       const webGpuCanvas = webGpuCanvasRef.current;
@@ -820,13 +998,12 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
         return;
       }
       runtimeRef.current = runtime;
-      const xserverLabel = runtime.xserver ? "Xserver WASM compositor" : "JS X11 protocol only";
+      const xserverLabel = runtime.xserver ? "Xserver WASM" : "JS X11";
+      const netsurfLabel = runtime.netsurf ? "NetSurf WASM" : "NetSurf unavailable";
       setBackend(
         runtime.presenter.kind === "webgpu"
-          ? `WebGPU · ${xserverLabel} · Aurora WM`
-          : runtime.presenter.kind === "wasm-canvas2d"
-            ? `Canvas2D · ${xserverLabel} · Aurora WM`
-            : `Canvas 2D fallback · ${xserverLabel}`,
+          ? `WebGPU · ${xserverLabel} · ${netsurfLabel}`
+          : `Canvas2D · ${xserverLabel} · ${netsurfLabel}`,
       );
       onRunningRef.current(true);
     };
@@ -893,14 +1070,15 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
         <span className={"desktop-status " + (status.startsWith("running") ? "running" : "")}>{status}</span>
       </div>
       <p className="web-desktop-intro">
-        Aurora WM auto-starts <strong>Aurora Files</strong> on session boot (same idea as upstream
-        <code> show_folder </code>/<code> aurora-files </code>
-        ). The Files window lists the live <code>/workspace</code> browser filesystem with Places,
-        toolbar, and selectable rows. Built from{" "}
+        Session boot launches <strong>Aurora Terminal</strong> + <strong>Aurora Files</strong> from{" "}
         <a href="https://github.com/ecooxai/aurora-wm" target="_blank" rel="noreferrer">
           ecooxai/aurora-wm
         </a>
-        .
+        {" "}and <strong>NetSurf</strong> compiled to WASM from{" "}
+        <a href="https://github.com/netsurf-browser/netsurf" target="_blank" rel="noreferrer">
+          netsurf-browser/netsurf
+        </a>
+        {" "}onto the in-tab Xserver.
       </p>
       <div className="web-display-shell">
         <canvas
@@ -929,8 +1107,8 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
       </div>
       <div className="web-desktop-footer">
         <span><i className="footer-dot" /> {backend}</span>
-        <span>{windows.length} managed X11 clients · Aurora Files auto-start</span>
-        <span>MapRequest · show_folder on boot</span>
+        <span>{windows.length} clients · Terminal + NetSurf + Files</span>
+        <span>MapRequest · apps auto-start</span>
       </div>
     </section>
   );

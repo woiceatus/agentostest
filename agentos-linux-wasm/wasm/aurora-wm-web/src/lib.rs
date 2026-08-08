@@ -19,6 +19,8 @@ const FRAME_CORNER_RADIUS: i32 = 8;
 const WINDOW_COUNT: usize = 3;
 const DOCK_BUTTONS: i32 = 5;
 const FILES_INDEX: usize = 2;
+const TERM_INDEX: usize = 0;
+const NETSURF_INDEX: usize = 1;
 const MAX_FILES: usize = 64;
 const NAME_CAP: usize = 96;
 const PATH_CAP: usize = 160;
@@ -29,12 +31,12 @@ const FONT_REGULAR: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSan
 const FONT_BOLD: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSans-Bold.ttf");
 const FONT_MONO: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSansMono-Regular.ttf");
 
-static STATUS_RUNNING: &[u8] = b"running - aurora-wm + Aurora Files";
+static STATUS_RUNNING: &[u8] = b"running - terminal + netsurf + files";
 static STATUS_IDLE: &[u8] = b"idle";
 static SOURCE_URL: &[u8] = b"https://github.com/ecooxai/aurora-wm";
 
-const WINDOW_TITLES: [&str; WINDOW_COUNT] = ["terminal", "agent log", "Aurora Files"];
-const DOCK_LABELS: [&str; 5] = ["Term", "Files", "Apps", "Set", "More"];
+const WINDOW_TITLES: [&str; WINDOW_COUNT] = ["Aurora Terminal", "NetSurf", "Aurora Files"];
+const DOCK_LABELS: [&str; 5] = ["Term", "Files", "Net", "Set", "More"];
 const PLACES: [&str; 4] = ["Home", "Workspace", "Etc", "Tmp"];
 
 #[derive(Clone, Copy)]
@@ -115,6 +117,9 @@ struct State {
     files: Vec<FileEntry>,
     files_selected: i32,
     files_visible: u32,
+    term_lines: Vec<String>,
+    term_visible: u32,
+    netsurf_visible: u32,
     path_buf: [u8; PATH_CAP],
     name_buf: [u8; NAME_CAP],
 }
@@ -127,7 +132,7 @@ impl State {
             wallpaper: Vec::new(),
             frame: Vec::new(),
             clients: [Client::empty(); WINDOW_COUNT],
-            active: FILES_INDEX as u32,
+            active: NETSURF_INDEX as u32,
             tick: 0,
             layout_version: 0,
             running: 0,
@@ -137,6 +142,9 @@ impl State {
             files: Vec::new(),
             files_selected: 0,
             files_visible: 1,
+            term_lines: Vec::new(),
+            term_visible: 1,
+            netsurf_visible: 1,
             path_buf: [0; PATH_CAP],
             name_buf: [0; NAME_CAP],
         }
@@ -181,34 +189,28 @@ fn dock_geometry(screen_width: i32, screen_height: i32) -> Rect {
     }
 }
 
-/// Layout mirrors upstream: Aurora Files uses folder_geometry-like placement and
-/// is the primary app window started with the WM.
+/// Layout: NetSurf (browser) left/primary, Files top-right, Aurora Terminal bottom-right.
+/// All three auto-start with the WM session.
 fn place_client(index: usize, screen_w: i32, _screen_h: i32, dock: Rect) -> Client {
     let content_top = TOPBAR_HEIGHT + 26;
     let content_bottom = dock.y - 16;
     let content_h = (content_bottom - content_top).max(240);
+    let browser_w = ((screen_w * 58) / 100).clamp(440, 580);
+    let side_x = 24 + browser_w + 14;
+    let side_w = (screen_w - side_x - 24).max(240);
 
     let (frame_x, frame_y, frame_w, frame_h) = match index {
+        NETSURF_INDEX => (24, content_top, browser_w, content_h),
         FILES_INDEX => {
-            // Upstream folder_geometry: left side, large.
-            let w = ((screen_w * 56) / 100).clamp(420, 560);
-            (24, content_top, w, content_h)
+            let h = ((content_h * 55) / 100).max(180);
+            (side_x, content_top, side_w, h)
         }
-        0 => {
-            let files_w = ((screen_w * 56) / 100).clamp(420, 560);
-            let x = 24 + files_w + 14;
-            let w = (screen_w - x - 24).max(240);
-            let h = ((content_h * 62) / 100).max(180);
-            (x, content_top, w, h)
-        }
-        _ => {
-            let files_w = ((screen_w * 56) / 100).clamp(420, 560);
-            let x = 24 + files_w + 14;
-            let w = (screen_w - x - 24).max(240);
-            let h = ((content_h * 34) / 100).max(120);
+        TERM_INDEX => {
+            let h = ((content_h * 40) / 100).max(150);
             let y = content_top + content_h - h;
-            (x, y, w, h)
+            (side_x, y, side_w, h)
         }
+        _ => (side_x, content_top, side_w, content_h / 2),
     };
 
     let frame = Rect {
@@ -732,28 +734,77 @@ fn draw_titlebar(
     );
 }
 
-fn draw_terminal_body(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect, active: bool) {
+fn draw_terminal_body(
+    frame: &mut [u8],
+    width: u32,
+    fonts: &Fonts,
+    content: Rect,
+    active: bool,
+    lines: &[String],
+) {
+    // Aurora Files-style terminal chrome (tab + light body), fed by host shell lines.
+    fill_rect(frame, width, content, [247, 252, 255, 245]);
     fill_rect(
         frame,
         width,
-        content,
+        Rect {
+            x: content.x,
+            y: content.y,
+            width: content.width,
+            height: 28,
+        },
+        [230, 238, 245, 255],
+    );
+    fill_round_rect(
+        frame,
+        width,
+        Rect {
+            x: content.x + 8,
+            y: content.y + 4,
+            width: 92,
+            height: 22,
+        },
+        8,
         if active {
-            [31, 51, 57, 245]
+            [255, 255, 255, 255]
         } else {
-            [24, 36, 42, 235]
+            [245, 248, 252, 255]
         },
     );
-    let lines = [
-        "agentOS shell ready",
-        "xterm PTY connected",
-        "$ ls /workspace",
-        "README.md  config.json  hello.txt",
-        "$ aurora-files /workspace",
-        "opened Aurora Files",
+    draw_text(
+        frame,
+        width,
+        &fonts.bold,
+        "shell",
+        content.x + 20,
+        content.y + 8,
+        12.0,
+        [40, 80, 95, 255],
+    );
+    let body_top = content.y + 30;
+    fill_rect(
+        frame,
+        width,
+        Rect {
+            x: content.x,
+            y: body_top,
+            width: content.width,
+            height: content.height - 30,
+        },
+        [24, 36, 42, 255],
+    );
+    let fallback = [
+        "Aurora Terminal".to_string(),
+        "compiled from ecooxai/aurora-wm".to_string(),
+        "PTY bridge: agentOS browser shell".to_string(),
+        "$ ls /workspace".to_string(),
+        "README.md  hello.txt  config.json".to_string(),
+        "$".to_string(),
     ];
-    let mut y = content.y + 14;
-    for line in lines {
-        if y + 18 > content.y + content.height {
+    let rows: &[String] = if lines.is_empty() { &fallback } else { lines };
+    let mut y = body_top + 10;
+    for line in rows {
+        if y + 16 > content.y + content.height - 4 {
             break;
         }
         draw_text(
@@ -761,50 +812,48 @@ fn draw_terminal_body(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect
             width,
             &fonts.mono,
             line,
-            content.x + 16,
+            content.x + 12,
             y,
-            13.0,
+            12.0,
             [115, 222, 210, 255],
         );
-        y += 20;
+        y += 16;
     }
 }
 
-fn draw_log_body(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect, active: bool) {
-    fill_rect(
+fn draw_netsurf_placeholder(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect) {
+    // Content is overwritten by netsurf-web.wasm framebuffer in the browser host.
+    fill_rect(frame, width, content, [248, 250, 252, 255]);
+    draw_text(
         frame,
         width,
-        content,
-        if active {
-            [31, 51, 57, 245]
-        } else {
-            [24, 36, 42, 235]
-        },
+        &fonts.bold,
+        "NetSurf",
+        content.x + 18,
+        content.y + 18,
+        18.0,
+        [20, 80, 140, 255],
     );
-    let lines = [
-        "Aurora WM attached",
-        "SubstructureRedirect",
-        "MapRequest: Aurora Files",
-        "files app running",
-        "source: ecooxai/aurora-wm",
-    ];
-    let mut y = content.y + 14;
-    for line in lines {
-        if y + 18 > content.y + content.height {
-            break;
-        }
-        draw_text(
-            frame,
-            width,
-            &fonts.regular,
-            line,
-            content.x + 16,
-            y,
-            13.0,
-            [180, 210, 220, 255],
-        );
-        y += 20;
-    }
+    draw_text(
+        frame,
+        width,
+        &fonts.regular,
+        "Loading netsurf-web.wasm framebuffer…",
+        content.x + 18,
+        content.y + 46,
+        13.0,
+        [60, 90, 120, 255],
+    );
+    draw_text(
+        frame,
+        width,
+        &fonts.regular,
+        "github.com/netsurf-browser/netsurf",
+        content.x + 18,
+        content.y + 68,
+        12.0,
+        [90, 120, 150, 255],
+    );
 }
 
 fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
@@ -858,7 +907,7 @@ fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
         frame,
         width,
         &fonts.regular,
-        "DISPLAY :0  ·  FILES RUNNING",
+        "DISPLAY :0  ·  TERM+NETSURF+FILES",
         width as i32 - 32,
         11,
         13.0,
@@ -872,7 +921,9 @@ fn draw_dock(frame: &mut [u8], width: u32, fonts: &Fonts, dock: Rect, active: u3
     for i in 0..DOCK_BUTTONS {
         let ix = dock.x + i * DOCK_STRIDE;
         let iy = cy - DOCK_ICON_SIZE / 2;
-        let focused = (i == 0 && active == 0) || (i == 1 && active == FILES_INDEX as u32);
+        let focused = (i == 0 && active == TERM_INDEX as u32)
+            || (i == 1 && active == FILES_INDEX as u32)
+            || (i == 2 && active == NETSURF_INDEX as u32);
         let color = match i {
             0 => [76, 197, 178, 235],
             1 => [115, 170, 220, 235],
@@ -945,6 +996,9 @@ fn render(state: &mut State) {
     let entries = state.files.clone();
     let selected = state.files_selected;
     let files_visible = state.files_visible;
+    let term_visible = state.term_visible;
+    let netsurf_visible = state.netsurf_visible;
+    let term_lines = state.term_lines.clone();
     let frame = &mut state.frame;
 
     draw_topbar(frame, width, &fonts, tick);
@@ -953,6 +1007,12 @@ fn render(state: &mut State) {
             continue;
         }
         if index == FILES_INDEX && files_visible == 0 {
+            continue;
+        }
+        if index == TERM_INDEX && term_visible == 0 {
+            continue;
+        }
+        if index == NETSURF_INDEX && netsurf_visible == 0 {
             continue;
         }
         let is_active = index as u32 == active;
@@ -978,8 +1038,16 @@ fn render(state: &mut State) {
                 &entries,
                 selected,
             ),
-            0 => draw_terminal_body(frame, width, &fonts, client.content, is_active),
-            _ => draw_log_body(frame, width, &fonts, client.content, is_active),
+            TERM_INDEX => draw_terminal_body(
+                frame,
+                width,
+                &fonts,
+                client.content,
+                is_active,
+                &term_lines,
+            ),
+            NETSURF_INDEX => draw_netsurf_placeholder(frame, width, &fonts, client.content),
+            _ => {}
         }
     }
     draw_dock(frame, width, &fonts, dock, active);
@@ -1011,10 +1079,12 @@ pub extern "C" fn aurora_init(width: u32, height: u32) -> u32 {
     let state = state();
     state.width = width.clamp(320, 1600);
     state.height = height.clamp(180, 1000);
-    state.active = FILES_INDEX as u32;
+    state.active = NETSURF_INDEX as u32;
     state.tick = 0;
     state.running = 1;
     state.files_visible = 1;
+    state.term_visible = 1;
+    state.netsurf_visible = 1;
     state.files_selected = 0;
     if state.files.is_empty() {
         state.files = default_files();
@@ -1270,6 +1340,76 @@ pub extern "C" fn aurora_files_count() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn aurora_term_show(show: u32) -> u32 {
+    let state = state();
+    state.term_visible = if show == 0 { 0 } else { 1 };
+    if state.term_visible == 1 {
+        state.active = TERM_INDEX as u32;
+        state.clients[TERM_INDEX].mapped = 1;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_visible() -> u32 {
+    state().term_visible
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_clear() {
+    state().term_lines.clear();
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_line_buf() -> u32 {
+    state().name_buf.as_mut_ptr() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_line_cap() -> u32 {
+    NAME_CAP as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_add_line(len: u32) -> u32 {
+    let state = state();
+    if state.term_lines.len() >= 40 {
+        state.term_lines.remove(0);
+    }
+    let n = (len as usize).min(NAME_CAP);
+    let line = String::from_utf8_lossy(&state.name_buf[..n]).to_string();
+    state.term_lines.push(line);
+    state.term_visible = 1;
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_netsurf_show(show: u32) -> u32 {
+    let state = state();
+    state.netsurf_visible = if show == 0 { 0 } else { 1 };
+    if state.netsurf_visible == 1 {
+        state.active = NETSURF_INDEX as u32;
+        state.clients[NETSURF_INDEX].mapped = 1;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_netsurf_visible() -> u32 {
+    state().netsurf_visible
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_netsurf_index() -> u32 {
+    NETSURF_INDEX as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_term_index() -> u32 {
+    TERM_INDEX as u32
+}
+
+#[no_mangle]
 pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u32 {
     let state = state();
     if index as usize >= WINDOW_COUNT {
@@ -1295,11 +1435,20 @@ pub extern "C" fn aurora_pointer_down(x: i32, y: i32) -> u32 {
         let local = x - dock.x;
         let button = local / DOCK_STRIDE;
         match button {
-            0 => state.active = 0,
+            0 => {
+                state.term_visible = 1;
+                state.active = TERM_INDEX as u32;
+                state.clients[TERM_INDEX].mapped = 1;
+            }
             1 => {
                 state.files_visible = 1;
                 state.active = FILES_INDEX as u32;
                 state.clients[FILES_INDEX].mapped = 1;
+            }
+            2 => {
+                state.netsurf_visible = 1;
+                state.active = NETSURF_INDEX as u32;
+                state.clients[NETSURF_INDEX].mapped = 1;
             }
             _ => {}
         }
