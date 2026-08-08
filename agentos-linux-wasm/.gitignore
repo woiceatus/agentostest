@@ -38,3 +38,22 @@ yarn-error.log*
 !.yarn/versions
 # Firefox/Gecko WASM rebuild tree (multi‑GB; clone locally — see wasm/vendor/README-firefox-wasm.md)
 wasm/vendor/firefox-wasm/
+
+# Official NetSurf workspace clone + wasm install prefix (multi‑GB; see docs/netsurf-x11-wasm.md)
+wasm/vendor/netsurf-workspace/
+# Full NetSurf browser sources (legacy vendor path)
+wasm/vendor/netsurf/content/
+wasm/vendor/netsurf/desktop/
+wasm/vendor/netsurf/utils/
+wasm/vendor/netsurf/include/
+wasm/vendor/netsurf/test/
+wasm/vendor/netsurf/tools/
+wasm/vendor/netsurf/frontends/amiga/
+wasm/vendor/netsurf/frontends/atari/
+wasm/vendor/netsurf/frontends/beos/
+wasm/vendor/netsurf/frontends/gtk/
+wasm/vendor/netsurf/frontends/monkey/
+wasm/vendor/netsurf/frontends/qt/
+wasm/vendor/netsurf/frontends/riscos/
+wasm/vendor/netsurf/frontends/windows/
+wasm/vendor/netsurf/frontends/framebuffer/fbtk/

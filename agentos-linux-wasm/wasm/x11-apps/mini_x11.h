@@ -66,6 +66,12 @@ void x_poly_fill_rect(XConn *c, uint32_t drawable, uint32_t gc, int x, int y, in
 void x_image_text8(XConn *c, uint32_t drawable, uint32_t gc, int x, int y, const char *text);
 void x_clear_area(XConn *c, uint32_t wid, int x, int y, int w, int h, int exposures);
 
+/* PutImage ZPixmap depth-32 (or depth-24 drawable accepting 32bpp).
+ * `pixels` is packed little-endian 0x00RRGGBB (same as JS XServer raster). */
+void x_put_image_zpixmap32(XConn *c, uint32_t drawable, uint32_t gc,
+                           int dst_x, int dst_y, int width, int height,
+                           const uint32_t *pixels);
+
 #ifdef __cplusplus
 }
 #endif

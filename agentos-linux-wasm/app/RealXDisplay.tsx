@@ -35,6 +35,8 @@ type AuroraShellHost = {
 type EmscriptenModule = {
   x11Transport?: X11ByteTransport;
   auroraShell?: AuroraShellHost;
+  HEAPU8?: Uint8Array;
+  callMain?: (args?: string[]) => number | Promise<number>;
   _aurora_wm_start?: () => number;
   _aurora_wm_pump?: () => number;
   _aurora_wm_is_running?: () => number;
@@ -152,8 +154,14 @@ async function loadXApp(
   extras?: Record<string, unknown>,
 ): Promise<EmscriptenModule> {
   const imported = (await import(/* @vite-ignore */ jsUrl)) as { default: ModuleFactory };
+  const base = jsUrl.replace(/[^/]+$/, "");
   const mod = await imported.default({
-    locateFile: (path: string) => (path.endsWith(".wasm") ? wasmUrl : path),
+    locateFile: (path: string) => {
+      if (path.endsWith(".wasm")) return wasmUrl;
+      // Preloaded NetSurf resources (.data) live next to the JS module.
+      if (path.endsWith(".data")) return new URL(path, base).href;
+      return path;
+    },
     print: (text: string) => console.log(`[x11-app] ${text}`),
     printErr: (text: string) => console.error(`[x11-app] ${text}`),
     ...(extras || {}),
@@ -311,12 +319,14 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       // Paint immediately once the WM is up (avoid black canvas while clients load).
       let xdemo: EmscriptenModule | null = null;
       let xclock: EmscriptenModule | null = null;
+      let netsurf: EmscriptenModule | null = null;
       let firefox: EmscriptenModule | null = null;
       const pump = () => {
         if (cancelled || !server) return;
         aurora._aurora_wm_pump?.();
         xdemo?._xdemo_pump?.();
         xclock?._xclock_pump?.(Math.round(performance.now()));
+        // Original NetSurf runs under ASYNCIFY (callMain); no explicit pump.
         firefox?._firefox_x11_pump?.();
         presentRoot(server, image, ctx);
         raf = requestAnimationFrame(pump);
@@ -352,7 +362,45 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       if (!xclock._xclock_start?.()) throw new Error("xclock failed X11 connect/map");
       aurora._aurora_wm_pump?.();
       pushLog("xclock-demo WASM: second real X11 client managed by Aurora");
-      setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock · firefox in 10s");
+
+      // ORIGINAL NetSurf (full package) → webx11 surface → PutImage on JS XServer.
+      try {
+        setStatus("running · launching original NetSurf on XServer…");
+        const nsTransport = createX11ByteTransport();
+        transports.push(nsTransport);
+        server.addClientStream(nsTransport.serverSide);
+        netsurf = await loadXApp(
+          new URL("/wasm/x11-apps/netsurf_x11.js", window.location.origin).href,
+          new URL("/wasm/x11-apps/netsurf_x11.wasm", window.location.origin).href,
+          nsTransport,
+        );
+        if (cancelled) return;
+        if (typeof netsurf.callMain !== "function") {
+          throw new Error("original NetSurf module missing callMain");
+        }
+        // Fire-and-forget: main() blocks in framebuffer_run(); ASYNCIFY yields.
+        void Promise.resolve(
+          netsurf.callMain([
+            "nsfb",
+            "-f",
+            "webx11",
+            "-w",
+            "720",
+            "-h",
+            "480",
+            "about:welcome",
+          ]),
+        ).catch((err) => {
+          console.error("[netsurf_x11] callMain ended", err);
+        });
+        aurora._aurora_wm_pump?.();
+        pushLog("netsurf_x11: ORIGINAL NetSurf (full pkg) → webx11 PutImage on JS XServer");
+        setStatus("running · Aurora WM + original NetSurf · xdemo + xclock · firefox in 10s");
+      } catch (err) {
+        pushLog(`netsurf_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
+        netsurf = null;
+        setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock · firefox in 10s");
+      }
 
       // Firefox X11 bridge loads 10s after WM is up so chrome/tasks stay responsive.
       const firefoxDelayMs = 10_000;
@@ -375,14 +423,26 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
               firefox = mod;
               aurora._aurora_wm_pump?.();
               pushLog("firefox_x11: X11 bridge mapped (Gecko rebuild → PutImage)");
-              setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock + firefox_x11");
+              setStatus(
+                netsurf
+                  ? "running · Aurora WM + NetSurf + firefox_x11 · xdemo + xclock"
+                  : "running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock + firefox_x11",
+              );
             } else {
               pushLog("firefox_x11: start failed (bridge present, not running)");
-              setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock");
+              setStatus(
+                netsurf
+                  ? "running · Aurora WM + NetSurf X11 · xdemo + xclock"
+                  : "running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock",
+              );
             }
           } catch (err) {
             pushLog(`firefox_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
-            setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock");
+            setStatus(
+              netsurf
+                ? "running · Aurora WM + NetSurf X11 · xdemo + xclock"
+                : "running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock",
+            );
           }
         })();
       }, firefoxDelayMs);
@@ -427,9 +487,12 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         <strong>DAMAGE</strong>, <strong>RANDR</strong>, and <strong>GLX</strong> (soft/WebGL).
         Clients <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same
         server. Pointer uses Sync GrabButton + ReplayPointer so titlebar drag / dock clicks work.
-        Files → Terminal uses the in-tab web shell (<code>ls</code>/<code>help</code>/…). Firefox is
-        rebuilt from source and mapped through an <strong>X11 bridge</strong> (not Puter&apos;s WebGL
-        chrome-demo) — see <code>docs/firefox-x11-wasm.md</code>.
+        Files → Terminal uses the in-tab web shell (<code>ls</code>/<code>help</code>/…).{" "}
+        <strong>Original NetSurf</strong> (full package) is compiled to WASM; only a thin{" "}
+        <code>webx11</code> surface adapter maps it via <code>PutImage</code> — see{" "}
+        <code>docs/netsurf-x11-wasm.md</code>.
+        Firefox is rebuilt from source on a delayed X11 bridge — see{" "}
+        <code>docs/firefox-x11-wasm.md</code>.
       </p>
       <div ref={shellRef} className="web-display-shell" tabIndex={0} role="application" aria-label="Real X11 screen">
         <canvas ref={canvasRef} className="web-display-canvas" style={{ pointerEvents: "none" }} />

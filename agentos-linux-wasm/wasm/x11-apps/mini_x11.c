@@ -252,3 +252,43 @@ void x_clear_area(XConn *c, uint32_t wid, int x, int y, int w, int h, int exposu
   put16(b + 14, (uint16_t)h);
   request(c, b, 16);
 }
+
+void x_put_image_zpixmap32(XConn *c, uint32_t drawable, uint32_t gc,
+                           int dst_x, int dst_y, int width, int height,
+                           const uint32_t *pixels) {
+  /* Tile into strips so we stay under the default max-request without BIG-REQUESTS. */
+  const int max_rows = 16;
+  uint8_t header[24];
+  for (int y0 = 0; y0 < height; y0 += max_rows) {
+    int rows = height - y0;
+    if (rows > max_rows) rows = max_rows;
+    int data_bytes = width * rows * 4;
+    int total = 24 + data_bytes;
+    int padded = (total + 3) & ~3;
+    /* Build request: opcode + format + length + fields + pixels */
+    static uint8_t buf[24 + 960 * 16 * 4 + 4];
+    if (padded > (int)sizeof(buf)) {
+      /* Fallback: even smaller strips */
+      rows = 4;
+      data_bytes = width * rows * 4;
+      total = 24 + data_bytes;
+      padded = (total + 3) & ~3;
+      if (padded > (int)sizeof(buf)) return;
+    }
+    memset(buf, 0, (size_t)padded);
+    buf[0] = 72; /* PutImage */
+    buf[1] = 2;  /* ZPixmap */
+    put16(buf + 2, (uint16_t)(padded / 4));
+    put32(buf + 4, drawable);
+    put32(buf + 8, gc);
+    put16(buf + 12, (uint16_t)width);
+    put16(buf + 14, (uint16_t)rows);
+    put16(buf + 16, (uint16_t)dst_x);
+    put16(buf + 18, (uint16_t)(dst_y + y0));
+    buf[20] = 0; /* leftPad */
+    buf[21] = 24; /* depth — JS server accepts 24/32 into depth-24 drawables */
+    memcpy(buf + 24, pixels + (size_t)y0 * (size_t)width, (size_t)data_bytes);
+    c->seq++;
+    if (send_all(buf, padded) != 0) return;
+  }
+}
