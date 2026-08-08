@@ -489,9 +489,9 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         Clients <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same
         server. Pointer uses Sync GrabButton + ReplayPointer so titlebar drag / dock clicks work.
         Files → Terminal uses the in-tab web shell (<code>ls</code>/<code>help</code>/…).{" "}
-        <strong>Original NetSurf</strong> (full package) is compiled to WASM; only a thin{" "}
-        <code>webx11</code> surface adapter maps it via <code>PutImage</code> — see{" "}
-        <code>docs/netsurf-x11-wasm.md</code>.
+        <strong>Original NetSurf</strong> (full package) runs as WASM in this AgentOS tab: thin{" "}
+        <code>webx11</code> → <code>PutImage</code> on the JS XServer, and HTTP(S) through the
+        AgentOS proxy (opens <strong>DuckDuckGo</strong>) — see <code>docs/netsurf-x11-wasm.md</code>.
         Firefox is rebuilt from source on a delayed X11 bridge — see{" "}
         <code>docs/firefox-x11-wasm.md</code>.
       </p>
