@@ -255,7 +255,9 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       const keysym = keysymFromDomKey(event);
       if (keysym == null) return;
       event.preventDefault();
-      const keycode = server.keymap.keycodeForKeysym(keysym);
+      const keycode =
+        server.keymap.keycodeForKeysym(keysym) ||
+        (event.key.length === 1 ? server.keymap.keycodeForKeysym(event.key.charCodeAt(0)) : 0);
       if (keycode) {
         server.injectKey(keycode, press);
         afterInject();
@@ -396,15 +398,16 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         });
         aurora._aurora_wm_pump?.();
         pushLog("netsurf_x11: ORIGINAL NetSurf → DuckDuckGo via AgentOS proxy + webx11 PutImage");
-        setStatus("running · Aurora WM + NetSurf (DuckDuckGo) · xdemo + xclock · firefox in 10s");
+        setStatus("running · Aurora WM + NetSurf (DuckDuckGo) · xdemo + xclock · firefox soon");
       } catch (err) {
         pushLog(`netsurf_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
         netsurf = null;
-        setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock · firefox in 10s");
+        setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock · firefox soon");
       }
 
-      // Firefox X11 bridge loads 10s after WM is up so chrome/tasks stay responsive.
-      const firefoxDelayMs = 10_000;
+      // Launch Firefox bridge soon after WM; Gecko libxul is rebuilt locally but
+      // paint→PutImage embed is still the bridge window (not full chrome yet).
+      const firefoxDelayMs = 1_500;
       pushLog(`firefox_x11: scheduled in ${firefoxDelayMs / 1000}s after WM start`);
       window.setTimeout(() => {
         if (cancelled || !server) return;

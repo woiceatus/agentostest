@@ -37,6 +37,14 @@ nsfb -f webx11 -w 720 -h 480 https://html.duckduckgo.com/html/
 HTTPS is fetched by the browser through the AgentOS proxy, then fed into
 original NetSurf’s fetcher pipeline.
 
+## Typing latency (webx11)
+
+The surface adapter batches PutImage to **once per input tick** (not once per
+plotter dirty rect), copies only the dirty rectangle, caps `emscripten_sleep`
+to ≤4 ms, and drops excess motion when the key queue is busy. Rebuild with
+`scripts/build-netsurf-original-wasm.sh` after changing
+`wasm/netsurf-webx11/` or `webx11_host_adapter.c`.
+
 ## Build
 
 ```bash

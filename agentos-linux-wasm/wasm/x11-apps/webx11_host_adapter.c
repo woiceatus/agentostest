@@ -3,6 +3,9 @@
  *
  * Does NOT modify NetSurf browser core. Overrides the weak webx11_host_* hooks
  * from libnsfb and presents the framebuffer with real X11 PutImage.
+ *
+ * Typing latency: dirty-rect PutImage + motion throttle (no full-frame copy
+ * on every keystroke).
  */
 #include "mini_x11.h"
 
@@ -27,7 +30,12 @@ static uint32_t win;
 static uint32_t gc;
 static int ready;
 static int connect_failed;
+static int win_w = NS_W;
+static int win_h = NS_H;
+/* Scratch for one dirty strip (full width × height worst case). */
 static uint32_t xpixels[NS_W * NS_H];
+static int last_mx = -1;
+static int last_my = -1;
 
 static int ensure_window(int width, int height)
 {
@@ -47,6 +55,8 @@ static int ensure_window(int width, int height)
 		width = NS_W;
 	if (height > NS_H)
 		height = NS_H;
+	win_w = width;
+	win_h = height;
 
 	win = x_new_id(&conn);
 	gc = x_new_id(&conn);
@@ -73,6 +83,13 @@ static void push_key(int unicode, int down)
 static void push_move(int x, int y)
 {
 	nsfb_event_t ev;
+	/* Drop motion when the queue is busy so key events stay snappy. */
+	if (webx11_queue_count() > 24)
+		return;
+	if (x == last_mx && y == last_my)
+		return;
+	last_mx = x;
+	last_my = y;
 	memset(&ev, 0, sizeof(ev));
 	ev.type = NSFB_EVENT_MOVE_ABSOLUTE;
 	ev.value.vector.x = x;
@@ -114,6 +131,32 @@ static int keycode_to_latin1(int keycode)
 		return '\r';
 	if (keycode == 22)
 		return '\b';
+	if (keycode == 23)
+		return '\t';
+	if (keycode == 59)
+		return ';';
+	if (keycode == 60)
+		return '\'';
+	if (keycode == 61)
+		return '`';
+	if (keycode == 20)
+		return '-';
+	if (keycode == 21)
+		return '=';
+	if (keycode == 34)
+		return '[';
+	if (keycode == 35)
+		return ']';
+	if (keycode == 51)
+		return '\\';
+	if (keycode == 47)
+		return ';';
+	if (keycode == 48)
+		return '\'';
+	if (keycode == 49)
+		return '`';
+	if (keycode == 50)
+		return 0; /* Shift — ignored as char */
 	if (keycode >= 10 && keycode <= 19) {
 		static const char row[] = "1234567890";
 		return row[keycode - 10];
@@ -157,13 +200,13 @@ void webx11_host_poll(void)
 	}
 }
 
-void webx11_host_present(nsfb_t *nsfb)
+void webx11_host_present(nsfb_t *nsfb, const nsfb_bbox_t *box)
 {
 	uint8_t *ptr = NULL;
 	int linelen = 0;
 	int width = 0, height = 0;
 	enum nsfb_format_e fmt = NSFB_FMT_ANY;
-	int w, h, x, y;
+	int x0, y0, x1, y1, w, h, x, y;
 
 	if (!nsfb)
 		return;
@@ -173,22 +216,46 @@ void webx11_host_present(nsfb_t *nsfb)
 	if (nsfb_get_buffer(nsfb, &ptr, &linelen) != 0 || !ptr)
 		return;
 
-	w = width;
-	h = height;
-	if (w > NS_W)
-		w = NS_W;
-	if (h > NS_H)
-		h = NS_H;
+	if (width > NS_W)
+		width = NS_W;
+	if (height > NS_H)
+		height = NS_H;
 
-	/* NetSurf webx11 uses XRGB8888 (0x00RRGGBB in little-endian memory). */
+	if (box) {
+		x0 = box->x0;
+		y0 = box->y0;
+		x1 = box->x1;
+		y1 = box->y1;
+	} else {
+		x0 = 0;
+		y0 = 0;
+		x1 = width;
+		y1 = height;
+	}
+	if (x0 < 0)
+		x0 = 0;
+	if (y0 < 0)
+		y0 = 0;
+	if (x1 > width)
+		x1 = width;
+	if (y1 > height)
+		y1 = height;
+	if (x1 <= x0 || y1 <= y0)
+		return;
+
+	w = x1 - x0;
+	h = y1 - y0;
+
+	/* Copy only the dirty rectangle (XRGB8888 already matches X PutImage). */
 	for (y = 0; y < h; y++) {
-		const uint32_t *src = (const uint32_t *)(ptr + y * linelen);
+		const uint32_t *src =
+			(const uint32_t *)(ptr + (size_t)(y0 + y) * (size_t)linelen) + x0;
 		uint32_t *dst = xpixels + (size_t)y * (size_t)w;
+		memcpy(dst, src, (size_t)w * sizeof(uint32_t));
 		for (x = 0; x < w; x++)
-			dst[x] = src[x] & 0x00ffffffu;
+			dst[x] &= 0x00ffffffu;
 	}
 
-	x_put_image_zpixmap32(&conn, win, gc, 0, 0, w, h, xpixels);
-	webx11_host_poll();
+	x_put_image_zpixmap32(&conn, win, gc, x0, y0, w, h, xpixels);
 	webx11_clear_dirty();
 }

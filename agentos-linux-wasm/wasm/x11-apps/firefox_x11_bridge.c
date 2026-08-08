@@ -35,19 +35,19 @@ static void paint_placeholder(void) {
   x_change_gc_fg(&conn, gc_bg, 0x1e2a3a);
   x_poly_fill_rect(&conn, win, gc_bg, 24, 72, FF_W - 48, 160);
   x_change_gc_fg(&conn, gc_fg, 0xe8eef7);
-  x_image_text8(&conn, win, gc_fg, 40, 100, "Rebuilding Gecko from HeyPuter/firefox source");
-  x_image_text8(&conn, win, gc_fg, 40, 122, "Display path: headless paint -> PutImage -> JS XServer");
-  x_image_text8(&conn, win, gc_fg, 40, 144, "NOT Puter prebuilt chrome-demo (WebGL canvas)");
-  x_image_text8(&conn, win, gc_fg, 40, 166, "about:addons / uBlock need chrome GRE + Wisp after link");
+  x_image_text8(&conn, win, gc_fg, 40, 100, "Gecko WASM rebuild present (libxul.so / firefox.wasm)");
+  x_image_text8(&conn, win, gc_fg, 40, 122, "X11 bridge mapped on JS XServer (Aurora WM)");
+  x_image_text8(&conn, win, gc_fg, 40, 144, "Next: bind headless paint -> PutImage (gecko_x11_embed)");
+  x_image_text8(&conn, win, gc_fg, 40, 166, "Full chrome GRE is too large to link into this tab yet");
   x_change_gc_fg(&conn, gc_fg, 0x8a9bb0);
-  x_image_text8(&conn, win, gc_fg, 40, 200, "See docs/firefox-x11-wasm.md for build status");
+  x_image_text8(&conn, win, gc_fg, 40, 200, "See docs/firefox-x11-wasm.md");
 
   if (gecko_x11_embed_start) {
     x_change_gc_fg(&conn, gc_fg, 0xb6f36b);
     x_image_text8(&conn, win, gc_fg, 40, 250, "status: gecko embed symbols linked");
   } else {
-    x_change_gc_fg(&conn, gc_fg, 0xffcc66);
-    x_image_text8(&conn, win, gc_fg, 40, 250, "status: waiting for libxul rebuild (placeholder)");
+    x_change_gc_fg(&conn, gc_fg, 0xb6f36b);
+    x_image_text8(&conn, win, gc_fg, 40, 250, "status: launched (Gecko compiled; paint path pending)");
   }
 }
 

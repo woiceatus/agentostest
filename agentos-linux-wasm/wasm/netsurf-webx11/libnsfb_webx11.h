@@ -14,10 +14,11 @@
 extern "C" {
 #endif
 
-void webx11_host_present(nsfb_t *nsfb);
+void webx11_host_present(nsfb_t *nsfb, const nsfb_bbox_t *box);
 void webx11_host_poll(void);
 
 int webx11_push_event(const nsfb_event_t *event);
+int webx11_queue_count(void);
 int webx11_is_dirty(void);
 void webx11_clear_dirty(void);
 

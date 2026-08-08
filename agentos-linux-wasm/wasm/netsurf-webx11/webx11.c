@@ -23,7 +23,7 @@
 #include "plot.h"
 
 #define UNUSED(x) ((x) = (x))
-#define WEBX11_QUEUE 64
+#define WEBX11_QUEUE 128
 
 struct webx11_state {
 	nsfb_event_t queue[WEBX11_QUEUE];
@@ -31,15 +31,18 @@ struct webx11_state {
 	int tail;
 	int count;
 	int dirty;
+	nsfb_bbox_t dirty_box;
+	int dirty_box_valid;
 };
 
 static struct webx11_state g_webx11;
 
 /* Host (X11 bridge) may set these; kept weak so native builds still link. */
-void webx11_host_present(nsfb_t *nsfb) __attribute__((weak));
-void webx11_host_present(nsfb_t *nsfb)
+void webx11_host_present(nsfb_t *nsfb, const nsfb_bbox_t *box) __attribute__((weak));
+void webx11_host_present(nsfb_t *nsfb, const nsfb_bbox_t *box)
 {
 	UNUSED(nsfb);
+	UNUSED(box);
 }
 
 void webx11_host_poll(void) __attribute__((weak));
@@ -57,6 +60,11 @@ int webx11_push_event(const nsfb_event_t *event)
 	return 0;
 }
 
+int webx11_queue_count(void)
+{
+	return g_webx11.count;
+}
+
 nsfb_t *webx11_current_nsfb;
 int webx11_is_dirty(void)
 {
@@ -65,6 +73,7 @@ int webx11_is_dirty(void)
 void webx11_clear_dirty(void)
 {
 	g_webx11.dirty = 0;
+	g_webx11.dirty_box_valid = 0;
 }
 
 static int webx11_defaults(nsfb_t *nsfb)
@@ -90,6 +99,7 @@ static int webx11_initialise(nsfb_t *nsfb)
 	nsfb->linelen = (nsfb->width * nsfb->bpp) / 8;
 	webx11_current_nsfb = nsfb;
 	g_webx11.dirty = 1;
+	g_webx11.dirty_box_valid = 0;
 	return 0;
 }
 
@@ -125,6 +135,7 @@ static int webx11_set_geometry(nsfb_t *nsfb, int width, int height,
 	nsfb->linelen = (nsfb->width * nsfb->bpp) / 8;
 	webx11_current_nsfb = nsfb;
 	g_webx11.dirty = 1;
+	g_webx11.dirty_box_valid = 0;
 	return 0;
 }
 
@@ -137,18 +148,35 @@ static int webx11_finalise(nsfb_t *nsfb)
 	return 0;
 }
 
+static void webx11_flush_present(nsfb_t *nsfb)
+{
+	if (!g_webx11.dirty || !webx11_host_present)
+		return;
+	webx11_host_present(nsfb,
+			    g_webx11.dirty_box_valid ? &g_webx11.dirty_box
+						     : NULL);
+}
+
 static bool webx11_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 {
-	UNUSED(nsfb);
 	if (webx11_host_poll)
 		webx11_host_poll();
+	/* Batch PutImage once per input tick (not on every plotter update). */
+	webx11_flush_present(nsfb);
 #ifdef __EMSCRIPTEN__
-	/* Yield to the browser event loop while waiting (needs ASYNCIFY). */
+	/*
+	 * Cap sleep hard so keystrokes stay responsive under ASYNCIFY.
+	 * Prefer draining the queue with no sleep when events are pending.
+	 */
 	if (g_webx11.count == 0 && timeout != 0) {
 		extern void emscripten_sleep(unsigned int ms);
-		emscripten_sleep(timeout > 0 ? (unsigned)timeout : 16u);
+		unsigned ms = timeout > 0 ? (unsigned)timeout : 4u;
+		if (ms > 4u)
+			ms = 4u;
+		emscripten_sleep(ms);
 		if (webx11_host_poll)
 			webx11_host_poll();
+		webx11_flush_present(nsfb);
 	}
 #else
 	UNUSED(timeout);
@@ -166,10 +194,26 @@ static bool webx11_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 
 static int webx11_update(nsfb_t *nsfb, nsfb_bbox_t *box)
 {
-	UNUSED(box);
+	UNUSED(nsfb);
 	g_webx11.dirty = 1;
-	if (webx11_host_present)
-		webx11_host_present(nsfb);
+	if (box != NULL) {
+		if (!g_webx11.dirty_box_valid) {
+			g_webx11.dirty_box = *box;
+			g_webx11.dirty_box_valid = 1;
+		} else {
+			if (box->x0 < g_webx11.dirty_box.x0)
+				g_webx11.dirty_box.x0 = box->x0;
+			if (box->y0 < g_webx11.dirty_box.y0)
+				g_webx11.dirty_box.y0 = box->y0;
+			if (box->x1 > g_webx11.dirty_box.x1)
+				g_webx11.dirty_box.x1 = box->x1;
+			if (box->y1 > g_webx11.dirty_box.y1)
+				g_webx11.dirty_box.y1 = box->y1;
+		}
+	} else {
+		g_webx11.dirty_box_valid = 0;
+	}
+	/* Defer present to webx11_input — avoids one PutImage per plotter call. */
 	return 0;
 }
 

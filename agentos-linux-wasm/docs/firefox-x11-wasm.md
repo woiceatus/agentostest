@@ -66,9 +66,12 @@ make build          # produces obj-full-emscripten/dist/bin/libxul.so
 ## Status (2026-08-08)
 
 - **Rejected:** shipping Puter prebuilt `chrome-demo` / WebGL iframe.
-- **In progress:** `make build` of HeyPuter/firefox @ `2e1e835a` with emsdk
-  6.0.1 inside `wasm/vendor/firefox-wasm/` (local only; gitignored).
-- **Done:** `firefox_x11` WASM client maps a window on the JS XServer (Aurora
-  manages it). Until `libxul.so` links, it paints a rebuild-status placeholder.
-- **Not done:** binding headless Gecko paint → `PutImage`, chrome GRE, Wisp to
-  AMO, about:addons, uBlock install. Do not claim those until verified.
+- **Done (local rebuild):** HeyPuter/firefox Gecko produces
+  `obj-full-emscripten/dist/bin/libxul.so` (~3.2 GiB) and `firefox.wasm`
+  (~6 MiB) under `wasm/vendor/firefox-wasm/` (gitignored).
+- **Done:** `firefox_x11` bridge launches ~1.5 s after WM start and maps a
+  window on the JS XServer (Aurora manages it). Status UI reports Gecko
+  compiled; paint path still pending.
+- **Not done:** linking `libxul.so` into the tab (impractical at ~3 GiB) and
+  binding headless paint → `PutImage`, chrome GRE, Wisp to AMO, about:addons,
+  uBlock. Do not claim those until verified.
