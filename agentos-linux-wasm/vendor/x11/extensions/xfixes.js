@@ -2,7 +2,7 @@
 
 // XFIXES 5.0 — regions, selection/cursor listeners, common compositor ops.
 
-const { XError, codes } = require('x11/lib/xserver/errors.js');
+const { XError, codes } = require('../errors');
 
 function ensureXfixes(server) {
     if (!server._xfixes) {

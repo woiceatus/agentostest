@@ -249,18 +249,23 @@ class XServer extends EventEmitter {
         require('./input').install(this);
         require('./misc').install(this);
 
-        // built-in extensions (stock + full compositor / RANDR / GLX stack)
-        const stock = name => require(`x11/lib/xserver/extensions/${name}`);
-        this.registerExtension('BIG-REQUESTS', stock('big-requests'));
-        this.registerExtension('XC-MISC', stock('xc-misc'));
-        this.registerExtension('RENDER', stock('render'));
+        // Relative requires only — Vite/rolldown browser bundles have no
+        // runtime `require("x11/...")` for absolute package paths.
+        this.registerExtension('BIG-REQUESTS', require('./extensions/big-requests'));
+        this.registerExtension('XC-MISC', require('./extensions/xc-misc'));
+        this.registerExtension('RENDER', require('./extensions/render'));
         // Names match wire/Xorg casing used by QueryExtension clients.
         this.registerExtension('SHAPE', require('./extensions/shape'));
         this.registerExtension('XFIXES', require('./extensions/xfixes'));
         this.registerExtension('DAMAGE', require('./extensions/damage'));
         this.registerExtension('Composite', require('./extensions/composite'));
         this.registerExtension('RANDR', require('./extensions/randr'));
-        this.registerExtension('GLX', require('./extensions/glx'));
+        try {
+            this.registerExtension('GLX', require('./extensions/glx'));
+        } catch (err) {
+            // GLX is optional for Aurora WM; keep the display alive.
+            this.emit('handlerError', err, { opcode: 'GLX' });
+        }
     }
 
     addClientStream(stream) {

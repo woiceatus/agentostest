@@ -55,9 +55,9 @@ export default defineConfig(async () => {
       alias: {
         buffer: "buffer/",
         // Sync GrabButton + AllowEvents(ReplayPointer) needed by real Aurora WM.
+        // Full XServer patch (Composite/RANDR/GLX) is copied into node_modules by
+        // install-ci — do not alias server.js to vendor/ (relative requires break).
         "x11/lib/xserver/input.js": path.resolve(projectRoot, "vendor/x11/input.js"),
-        // Full COMPOSITE / XFIXES / SHAPE / DAMAGE / RANDR / GLX stack.
-        "x11/lib/xserver/server.js": path.resolve(projectRoot, "vendor/x11/server.js"),
       },
     },
     optimizeDeps: {

@@ -2,7 +2,7 @@
 
 // DAMAGE 1.1 — Create/Destroy/Subtract/Add + DamageNotify.
 
-const { XError, codes } = require('x11/lib/xserver/errors.js');
+const { XError, codes } = require('../errors');
 
 function ensureDamage(server) {
     if (!server._damage)

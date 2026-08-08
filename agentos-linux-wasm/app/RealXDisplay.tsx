@@ -13,6 +13,7 @@ type X11Server = {
   width: number;
   height: number;
   root: { raster?: { data?: Uint32Array }; backgroundPixel?: number };
+  extensions?: Map<string, unknown>;
   keymap: { keycodeForKeysym: (keysym: number) => number };
   on: (event: string, listener: (value: unknown) => void) => void;
   addClientStream: (stream: unknown) => void;
@@ -273,8 +274,16 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
 
       setStatus("booting JS XServer (real X11 protocol)…");
       server = new XServer({ width: DISPLAY_WIDTH, height: DISPLAY_HEIGHT }) as unknown as X11Server;
-      if (server.root) server.root.backgroundPixel = 0x0b1a22;
+      if (server.root) {
+        server.root.backgroundPixel = 0x0b1a22;
+        const data = server.root.raster?.data;
+        if (data) data.fill(0x0b1a22);
+      }
+      const extNames = server.extensions
+        ? [...(server.extensions as Map<string, unknown>).keys()].join(", ")
+        : "";
       pushLog("XServer in-tab · real X11 wire protocol (node-x11)");
+      pushLog(`extensions: ${extNames || "(none)"}`);
       pushLog("input: Sync GrabButton + AllowEvents(ReplayPointer) enabled");
 
       // WM must claim SubstructureRedirect before other clients MapWindow.
@@ -299,11 +308,33 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       pushLog("aurora-wm WASM: SubstructureRedirect + chrome (real ecooxai WM)");
       pushLog("aurora Files terminal → web shell (ls/cd/cat/…; no host fork)");
 
+      // Paint immediately once the WM is up (avoid black canvas while clients load).
+      let xdemo: EmscriptenModule | null = null;
+      let xclock: EmscriptenModule | null = null;
+      let firefox: EmscriptenModule | null = null;
+      const pump = () => {
+        if (cancelled || !server) return;
+        aurora._aurora_wm_pump?.();
+        xdemo?._xdemo_pump?.();
+        xclock?._xclock_pump?.(Math.round(performance.now()));
+        firefox?._firefox_x11_pump?.();
+        presentRoot(server, image, ctx);
+        raf = requestAnimationFrame(pump);
+      };
+      raf = requestAnimationFrame(pump);
+      onRunning(true);
+      shell.focus({ preventScroll: true });
+      setStatus("running · Aurora WM up · loading X11 clients…");
+
       setStatus("launching compiled X11 clients (xdemo + xclock)…");
       const demoTransport = createX11ByteTransport();
       transports.push(demoTransport);
       server.addClientStream(demoTransport.serverSide);
-      const xdemo = await loadXApp(new URL("/wasm/x11-apps/xdemo.js", window.location.origin).href, new URL("/wasm/x11-apps/xdemo.wasm", window.location.origin).href, demoTransport);
+      xdemo = await loadXApp(
+        new URL("/wasm/x11-apps/xdemo.js", window.location.origin).href,
+        new URL("/wasm/x11-apps/xdemo.wasm", window.location.origin).href,
+        demoTransport,
+      );
       if (cancelled) return;
       if (!xdemo._xdemo_start?.()) throw new Error("xdemo failed X11 connect/map");
       aurora._aurora_wm_pump?.();
@@ -312,54 +343,49 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       const clockTransport = createX11ByteTransport();
       transports.push(clockTransport);
       server.addClientStream(clockTransport.serverSide);
-      const xclock = await loadXApp(new URL("/wasm/x11-apps/xclock.js", window.location.origin).href, new URL("/wasm/x11-apps/xclock.wasm", window.location.origin).href, clockTransport);
+      xclock = await loadXApp(
+        new URL("/wasm/x11-apps/xclock.js", window.location.origin).href,
+        new URL("/wasm/x11-apps/xclock.wasm", window.location.origin).href,
+        clockTransport,
+      );
       if (cancelled) return;
       if (!xclock._xclock_start?.()) throw new Error("xclock failed X11 connect/map");
       aurora._aurora_wm_pump?.();
       pushLog("xclock-demo WASM: second real X11 client managed by Aurora");
+      setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock · firefox in 10s");
 
-      // Firefox X11 bridge: rebuilt Gecko will PutImage here; placeholder until libxul links.
-      let firefox: EmscriptenModule | null = null;
-      try {
-        const ffTransport = createX11ByteTransport();
-        transports.push(ffTransport);
-        server.addClientStream(ffTransport.serverSide);
-        firefox = await loadXApp(
-          new URL("/wasm/x11-apps/firefox_x11.js", window.location.origin).href,
-          new URL("/wasm/x11-apps/firefox_x11.wasm", window.location.origin).href,
-          ffTransport,
-        );
-        if (cancelled) return;
-        if (firefox._firefox_x11_start?.()) {
-          aurora._aurora_wm_pump?.();
-          pushLog("firefox_x11: X11 bridge mapped (Gecko rebuild → PutImage; see docs/firefox-x11-wasm.md)");
-        } else {
-          pushLog("firefox_x11: start failed (bridge present, not running)");
-          firefox = null;
-        }
-      } catch (err) {
-        pushLog(`firefox_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
-        firefox = null;
-      }
-
-      setStatus(
-        firefox
-          ? "running · Aurora WM + COMPOSITE/RANDR/GLX XServer · xdemo + xclock + firefox_x11"
-          : "running · Aurora WM + COMPOSITE/RANDR/GLX XServer · xdemo + xclock",
-      );
-      onRunning(true);
-      shell.focus({ preventScroll: true });
-
-      const pump = () => {
+      // Firefox X11 bridge loads 10s after WM is up so chrome/tasks stay responsive.
+      const firefoxDelayMs = 10_000;
+      pushLog(`firefox_x11: scheduled in ${firefoxDelayMs / 1000}s after WM start`);
+      window.setTimeout(() => {
         if (cancelled || !server) return;
-        aurora._aurora_wm_pump?.();
-        xdemo._xdemo_pump?.();
-        xclock._xclock_pump?.(Math.round(performance.now()));
-        firefox?._firefox_x11_pump?.();
-        presentRoot(server, image, ctx);
-        raf = requestAnimationFrame(pump);
-      };
-      raf = requestAnimationFrame(pump);
+        void (async () => {
+          try {
+            setStatus("running · loading firefox_x11 bridge…");
+            const ffTransport = createX11ByteTransport();
+            transports.push(ffTransport);
+            server.addClientStream(ffTransport.serverSide);
+            const mod = await loadXApp(
+              new URL("/wasm/x11-apps/firefox_x11.js", window.location.origin).href,
+              new URL("/wasm/x11-apps/firefox_x11.wasm", window.location.origin).href,
+              ffTransport,
+            );
+            if (cancelled) return;
+            if (mod._firefox_x11_start?.()) {
+              firefox = mod;
+              aurora._aurora_wm_pump?.();
+              pushLog("firefox_x11: X11 bridge mapped (Gecko rebuild → PutImage)");
+              setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock + firefox_x11");
+            } else {
+              pushLog("firefox_x11: start failed (bridge present, not running)");
+              setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock");
+            }
+          } catch (err) {
+            pushLog(`firefox_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
+            setStatus("running · Aurora WM + COMPOSITE/RANDR/GLX · xdemo + xclock");
+          }
+        })();
+      }, firefoxDelayMs);
     };
 
     void start().catch((error: unknown) => {

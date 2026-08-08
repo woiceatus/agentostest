@@ -1,44 +1,92 @@
 'use strict';
 
-// Software / OffscreenCanvas-WebGL backend for in-tab GLX.
-// Prefer WebGL2 when OffscreenCanvas is available; otherwise paint a soft
-// clear-color framebuffer that SwapBuffers can present into X drawables.
+// Self-contained soft GL backend for in-tab GLX (no WebGL / browser/glx import).
+// Enough for QueryVersion / CreateContext / MakeCurrent / SwapBuffers clear+rect.
 
-const { RecordingBackend, WebGLBackend, BACKEND_METHODS } = require('x11/browser/glx/gl-backend.js');
-
-class SoftGLBackend extends RecordingBackend {
+class SoftGLBackend {
     constructor() {
-        super();
-        this.clearColor = [0, 0, 0, 1];
-        this.pixels = new Uint32Array(0);
+        this.calls = [];
+        this.caps = new Set();
+        this.width = 0;
+        this.height = 0;
+        this.clearColorValue = [0, 0, 0, 1];
         this._color = [1, 1, 1, 1];
+        this.pixels = new Uint32Array(0);
     }
 
-    resize(width, height) {
-        super.resize(width, height);
-        const n = Math.max(0, (width | 0) * (height | 0));
-        if (this.pixels.length !== n)
-            this.pixels = new Uint32Array(n);
-        this._fillClear();
-    }
+    matrixMode() {}
+    loadIdentity() {}
+    loadMatrix() {}
+    multMatrix() {}
+    pushMatrix() {}
+    popMatrix() {}
+    rotate() {}
+    translate() {}
+    scale() {}
+    ortho() {}
+    frustum() {}
+    begin() {}
+    end() {}
+    vertex() {}
+    normal() {}
+    texCoord() {}
+    rasterPos() {}
+    viewport() {}
+    clearDepth() {}
+    clearStencil() {}
+    colorMask() {}
+    depthMask() {}
+    stencilMask() {}
+    drawBuffer() {}
+    readBuffer() {}
+    depthFunc() {}
+    alphaFunc() {}
+    blendFunc() {}
+    logicOp() {}
+    stencilFunc() {}
+    stencilOp() {}
+    cullFace() {}
+    frontFace() {}
+    shadeModel() {}
+    polygonMode() {}
+    scissor() {}
+    lineWidth() {}
+    lineStipple() {}
+    pointSize() {}
+    hint() {}
+    light() {}
+    lightModel() {}
+    material() {}
+    colorMaterial() {}
+    fog() {}
+    bindTexture() {}
+    deleteTextures() {}
+    texParameter() {}
+    texEnv() {}
+    texGen() {}
+    texImage2D() {}
+    programString() {}
+    bindProgram() {}
+    finish() {}
+    flush() {}
 
-    clearColor(r, g, b, a) {
-        this.calls.push(['clearColor', r, g, b, a]);
-        this.clearColor = [r, g, b, a];
-    }
+    enable(cap) { this.caps.add(cap); }
+    disable(cap) { this.caps.delete(cap); }
+    isEnabled(cap) { return this.caps.has(cap); }
 
     color(r, g, b, a) {
-        this.calls.push(['color', r, g, b, a]);
         this._color = [r, g, b, typeof a === 'number' ? a : 1];
     }
 
-    clear(mask) {
-        this.calls.push(['clear', mask]);
+    clearColor(r, g, b, a) {
+        this.clearColorValue = [r, g, b, a];
+    }
+
+    clear() {
         this._fillClear();
     }
 
     rectf(x1, y1, x2, y2) {
-        this.calls.push(['rectf', x1, y1, x2, y2]);
         const c = this._pack(this._color);
         const x0 = Math.max(0, Math.min(this.width, Math.floor(Math.min(x1, x2))));
         const x1i = Math.max(0, Math.min(this.width, Math.ceil(Math.max(x1, x2))));
@@ -51,8 +99,20 @@ class SoftGLBackend extends RecordingBackend {
         }
     }
 
+    resize(width, height) {
+        this.width = width | 0;
+        this.height = height | 0;
+        const n = Math.max(0, this.width * this.height);
+        if (this.pixels.length !== n)
+            this.pixels = new Uint32Array(n);
+        this._fillClear();
+    }
+
+    readPixels() {
+        return Buffer.alloc(0);
+    }
+
     readPixelsUint32(w, h) {
-        this.calls.push(['readPixelsUint32', w, h]);
         if (w === this.width && h === this.height)
             return this.pixels;
         const out = new Uint32Array(w * h);
@@ -63,11 +123,14 @@ class SoftGLBackend extends RecordingBackend {
         return out;
     }
 
+    getParameter() {
+        return null;
+    }
+
     getString(name) {
-        this.calls.push(['getString', name]);
         switch (name) {
             case 0x1F00: return 'agentos-linux-wasm';
-            case 0x1F01: return 'SoftGL (CPU / OffscreenCanvas)';
+            case 0x1F01: return 'SoftGL';
             case 0x1F02: return '1.4 agentos soft-glx';
             case 0x1F03: return '';
             default: return null;
@@ -82,47 +145,13 @@ class SoftGLBackend extends RecordingBackend {
     }
 
     _fillClear() {
-        if (!this.pixels.length)
-            return;
-        this.pixels.fill(this._pack(this.clearColor));
-    }
-}
-
-function tryCreateWebGLBackend() {
-    try {
-        if (typeof OffscreenCanvas === 'undefined')
-            return null;
-        const canvas = new OffscreenCanvas(64, 64);
-        const gl = canvas.getContext('webgl2', {
-            preserveDrawingBuffer: true,
-            stencil: true,
-            depth: true,
-            alpha: false
-        });
-        if (!gl)
-            return null;
-        const backend = new WebGLBackend(gl);
-        backend._offscreenCanvas = canvas;
-        const origResize = backend.resize.bind(backend);
-        backend.resize = (w, h) => {
-            canvas.width = Math.max(1, w | 0);
-            canvas.height = Math.max(1, h | 0);
-            return origResize(w, h);
-        };
-        return backend;
-    } catch {
-        return null;
+        if (this.pixels.length)
+            this.pixels.fill(this._pack(this.clearColorValue));
     }
 }
 
 function createGlBackend() {
-    return tryCreateWebGLBackend() || new SoftGLBackend();
+    return new SoftGLBackend();
 }
 
-module.exports = {
-    SoftGLBackend,
-    createGlBackend,
-    BACKEND_METHODS,
-    RecordingBackend,
-    WebGLBackend
-};
+module.exports = { SoftGLBackend, createGlBackend };

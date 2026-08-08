@@ -2,7 +2,7 @@
 
 // SHAPE 1.1 — bounding/clip/input regions tracked per window.
 
-const { XError, codes } = require('x11/lib/xserver/errors.js');
+const { XError, codes } = require('../errors');
 
 function ensureShape(win) {
     if (!win.shape) {

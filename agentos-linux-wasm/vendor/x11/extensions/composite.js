@@ -2,7 +2,7 @@
 
 // COMPOSITE 0.4 — enough for Aurora light compositor + NameWindowPixmap.
 
-const { XError, codes } = require('x11/lib/xserver/errors.js');
+const { XError, codes } = require('../errors');
 
 function ensureCompositeState(server) {
     if (!server._composite)
@@ -97,7 +97,7 @@ module.exports = {
                 const win = server.getWindow(body.readUInt32LE(0));
                 let overlay = state.overlayByRoot.get(win.id);
                 if (!overlay) {
-                    const windows = require('x11/lib/xserver/windows.js');
+                    const windows = require('../windows');
                     if (!server._compositeOverlaySeq)
                         server._compositeOverlaySeq = 1;
                     const id = (0x70000000 + server._compositeOverlaySeq++) >>> 0;

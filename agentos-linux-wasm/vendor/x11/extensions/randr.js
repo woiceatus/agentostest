@@ -2,7 +2,7 @@
 
 // RANDR 1.6 — single virtual output/crtc matching the JS XServer screen.
 
-const { XError, codes } = require('x11/lib/xserver/errors.js');
+const { XError, codes } = require('../errors');
 
 const CRTC_ID = 0x61;
 const OUTPUT_ID = 0x62;
@@ -148,7 +148,7 @@ module.exports = {
                 const width = body.readUInt16LE(4);
                 const height = body.readUInt16LE(6);
                 if (width >= 320 && height >= 200) {
-                    const { Raster } = require('x11/lib/xserver/raster.js');
+                    const { Raster } = require('../raster');
                     server.width = width;
                     server.height = height;
                     server.root.width = width;
