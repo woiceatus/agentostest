@@ -1,0 +1,253 @@
+--- a/ScreenManager.c
++++ b/ScreenManager.c
+@@ -15,6 +15,10 @@
+ #include <string.h>
+ #include <sys/time.h>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #include "CRT.h"
+ #include "FunctionBar.h"
+ #include "Machine.h"
+@@ -260,6 +264,10 @@ void ScreenManager_run(ScreenManager* this, Panel** lastFocus, int* lastKey, con
+    this->name = name;
+ 
+    while (!quit) {
++#ifdef __EMSCRIPTEN__
++      /* Let the browser worker service PTY input between ncurses frames. */
++      emscripten_sleep(16);
++#endif
+       if (this->header) {
+          checkRecalculation(this, &oldTime, &sortTimeout, &redraw, &rescan, &timedOut, &force_redraw);
+       }
+--- a/htop.c
++++ b/htop.c
+@@ -10,6 +10,28 @@
+ 
+ #include "CommandLine.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++void agentos_set_terminal_size(int columns, int rows);
++
++EMSCRIPTEN_KEEPALIVE
++void agentos_set_terminal_size(int columns, int rows) {
++   char value[16];
++
++   snprintf(value, sizeof(value), "%d", columns > 20 ? columns : 80);
++   setenv("COLUMNS", value, 1);
++   snprintf(value, sizeof(value), "%d", rows > 10 ? rows : 24);
++   setenv("LINES", value, 1);
++   setenv("TERM", "xterm-256color", 1);
++   setenv("COLORTERM", "truecolor", 1);
++   setenv("HOME", "/home/root", 1);
++   setenv("USER", "root", 1);
++   setenv("SHELL", "/bin/sh", 1);
++}
++#endif
+ 
+ const char* program = PACKAGE;
+ 
+--- a/unsupported/UnsupportedMachine.c
++++ b/unsupported/UnsupportedMachine.c
+@@ -12,6 +12,10 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten/heap.h>
++#endif
++
+ #include "Machine.h"
+ 
+ 
+@@ -48,8 +52,13 @@ void Machine_scan(Machine* super) {
+    super->totalSwap = 0;
+    super->usedSwap = 0;
+    super->cachedSwap = 0;
++#ifdef __EMSCRIPTEN__
++   super->totalMem = emscripten_get_heap_size() / 1024;
++   this->usedMem = *emscripten_get_sbrk_ptr() / 1024;
++#else
+    super->totalMem = 0;
+    this->usedMem = 0;
++#endif
+    this->cachedMem = 0;
+ }
+ 
+--- a/unsupported/UnsupportedProcessTable.c
++++ b/unsupported/UnsupportedProcessTable.c
+@@ -11,6 +11,13 @@
+ 
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include <emscripten/heap.h>
++#endif
+ 
+ #include "ProcessTable.h"
+ #include "UnsupportedProcess.h"
+@@ -34,23 +41,23 @@ void ProcessTable_delete(Object* cast) {
+ 
+ void ProcessTable_goThroughEntries(ProcessTable* super) {
+    bool preExisting = true;
+-   Process* proc;
+-
+-   proc = ProcessTable_getProcess(super, 1, &preExisting, UnsupportedProcess_new);
++   pid_t pid = getpid();
++   if (pid <= 0)
++      pid = 2;
++   Process* proc = ProcessTable_getProcess(super, pid, &preExisting, UnsupportedProcess_new);
+ 
+-   /* Empty values */
+-   proc->time = proc->time + 10;
+-   Process_setPid(proc, 1);
++   proc->time = (unsigned long long)((double)clock() * 100.0 / CLOCKS_PER_SEC);
++   Process_setPid(proc, pid);
+    Process_setParent(proc, 1);
+    Process_setThreadGroup(proc, 0);
+ 
+-   Process_updateComm(proc, "commof16char");
+-   Process_updateCmdline(proc, "<unsupported architecture>", 0, 0);
+-   Process_updateExe(proc, "/path/to/executable");
++   Process_updateComm(proc, "htop.wasm");
++   Process_updateCmdline(proc, "htop", 0, 0);
++   Process_updateExe(proc, "/usr/bin/htop.wasm");
+ 
+    const Settings* settings = super->super.host->settings;
+    if (settings->ss->flags & PROCESS_FLAG_CWD) {
+-      free_and_xStrdup(&proc->procCwd, "/current/working/directory");
++      free_and_xStrdup(&proc->procCwd, "/workspace");
+    }
+ 
+    proc->super.updated = true;
+@@ -66,24 +73,35 @@ void ProcessTable_goThroughEntries(ProcessTable* super) {
+    proc->tpgid = 0;
+    proc->processor = 0;
+ 
+-   proc->percent_cpu = 2.5;
+-   proc->percent_mem = 2.5;
++#ifdef __EMSCRIPTEN__
++   const size_t heapSize = emscripten_get_heap_size();
++   const size_t heapUsed = *emscripten_get_sbrk_ptr();
++   proc->m_virt = heapSize / 1024;
++   proc->m_resident = heapUsed / 1024;
++   proc->percent_mem = heapSize ? (100.0 * heapUsed / heapSize) : 0.0;
++   proc->starttime_ctime = time(NULL) - (time_t)(emscripten_get_now() / 1000.0);
++#else
++   proc->m_virt = 0;
++   proc->m_resident = 0;
++   proc->percent_mem = 0.0;
++   proc->starttime_ctime = time(NULL);
++#endif
++   proc->percent_cpu = 0.0;
+    Process_updateCPUFieldWidths(proc->percent_cpu);
+ 
+    proc->st_uid = 0;
+-   proc->user = "nobody"; /* Update whenever proc->st_uid is changed */
++   proc->user = "root"; /* Update whenever proc->st_uid is changed */
+ 
+    proc->priority = 0;
+    proc->nice = 0;
+    proc->nlwp = 1;
+-   proc->starttime_ctime = 1433116800; // Jun 01, 2015
+    Process_fillStarttimeBuffer(proc);
+ 
+-   proc->m_virt = 100;
+-   proc->m_resident = 100;
++   proc->minflt = 0;
++   proc->majflt = 0;
+ 
+-   proc->minflt = 20;
+-   proc->majflt = 20;
++   super->totalTasks++;
++   super->runningTasks++;
+ 
+    if (!preExisting)
+       ProcessTable_add(super, proc);
+--- a/unsupported/Platform.c
++++ b/unsupported/Platform.c
+@@ -12,6 +12,10 @@
+ 
+ #include <math.h>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++
+ #include "CPUMeter.h"
+ #include "DateTimeMeter.h"
+ #include "FileDescriptorMeter.h"
+@@ -24,6 +28,7 @@
+ #include "SysArchMeter.h"
+ #include "TasksMeter.h"
+ #include "UptimeMeter.h"
++#include "unsupported/UnsupportedMachine.h"
+ 
+ 
+ const ScreenDefaults Platform_defaultScreens[] = {
+@@ -87,7 +92,7 @@ const MeterClass* const Platform_meterTypes[] = {
+    NULL
+ };
+ 
+-static const char Platform_unsupported[] = "unsupported";
++static const char Platform_unsupported[] = "WebAssembly";
+ 
+ bool Platform_init(void) {
+    /* no platform-specific setup needed */
+@@ -104,7 +109,11 @@ void Platform_setBindings(Htop_Action* keys) {
+ }
+ 
+ int Platform_getUptime(void) {
++#ifdef __EMSCRIPTEN__
++   return (int)(emscripten_get_now() / 1000.0);
++#else
+    return 0;
++#endif
+ }
+ 
+ void Platform_getLoadAverage(double* one, double* five, double* fifteen) {
+@@ -130,9 +139,12 @@ double Platform_setCPUValues(Meter* this, unsigned int cpu) {
+ }
+ 
+ void Platform_setMemoryValues(Meter* this) {
++   const Machine* host = this->host;
++   const UnsupportedMachine* wasmHost = (const UnsupportedMachine*) host;
+    double* v = this->values;
+-   v[MEMORY_CLASS_USED] = NAN;
+-   v[MEMORY_CLASS_CACHED] = NAN;
++   this->total = host->totalMem;
++   v[MEMORY_CLASS_USED] = wasmHost->usedMem;
++   v[MEMORY_CLASS_CACHED] = wasmHost->cachedMem;
+ 
+    this->curItems = 2;
+ }
+@@ -152,8 +164,8 @@ FileLocks_ProcessData* Platform_getProcessLocks(pid_t pid) {
+ }
+ 
+ void Platform_getFileDescriptors(double* used, double* max) {
+-   *used = 1337;
+-   *max = 4711;
++   *used = 3;
++   *max = 4096;
+ }
+ 
+ bool Platform_getDiskIO(DiskIOData* data) {
+@@ -172,7 +184,7 @@ void Platform_getBattery(double* percent, ACPresence* isOnAC) {
+ }
+ 
+ void Platform_getHostname(char* buffer, size_t size) {
+-   String_safeStrncpy(buffer, Platform_unsupported, size);
++   String_safeStrncpy(buffer, "agentos-wasm", size);
+ }
+ 
+ const char* Platform_getRelease(void) {

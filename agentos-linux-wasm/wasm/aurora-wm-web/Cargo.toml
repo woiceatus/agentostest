@@ -1,0 +1,19 @@
+[package]
+name = "aurora-wm-web"
+version = "0.3.0"
+edition = "2021"
+description = "Browser WASM port of ecooxai/aurora-wm (https://github.com/ecooxai/aurora-wm)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+image = { version = "=0.24.9", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

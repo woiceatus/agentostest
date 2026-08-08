@@ -1,0 +1,16 @@
+[package]
+name = "agentos-xserver-web"
+version = "0.2.0"
+edition = "2021"
+description = "In-browser display-server compositor for AgentOS (pairs with JS X11 protocol server)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
