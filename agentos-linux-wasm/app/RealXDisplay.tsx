@@ -379,6 +379,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
           throw new Error("original NetSurf module missing callMain");
         }
         // Fire-and-forget: main() blocks in framebuffer_run(); ASYNCIFY yields.
+        // HTTP(S) goes through AgentOS /__agentos/proxy (browser TLS) — open DuckDuckGo.
         void Promise.resolve(
           netsurf.callMain([
             "nsfb",
@@ -388,14 +389,14 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
             "720",
             "-h",
             "480",
-            "about:welcome",
+            "https://html.duckduckgo.com/html/",
           ]),
         ).catch((err) => {
           console.error("[netsurf_x11] callMain ended", err);
         });
         aurora._aurora_wm_pump?.();
-        pushLog("netsurf_x11: ORIGINAL NetSurf (full pkg) → webx11 PutImage on JS XServer");
-        setStatus("running · Aurora WM + original NetSurf · xdemo + xclock · firefox in 10s");
+        pushLog("netsurf_x11: ORIGINAL NetSurf → DuckDuckGo via AgentOS proxy + webx11 PutImage");
+        setStatus("running · Aurora WM + NetSurf (DuckDuckGo) · xdemo + xclock · firefox in 10s");
       } catch (err) {
         pushLog(`netsurf_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
         netsurf = null;

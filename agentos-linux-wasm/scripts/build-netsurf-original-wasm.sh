@@ -156,7 +156,7 @@ override NETSURF_USE_OPENSSL := NO
 override NETSURF_USE_UTF8PROC := YES
 override NETSURF_USE_LIBICONV_PLUG := YES
 override NETSURF_FB_RESPATH := /share/netsurf
-override NETSURF_HOMEPAGE := about:welcome
+override NETSURF_HOMEPAGE := https://html.duckduckgo.com/html/
 EOF
 
 echo "=== Compiling original NetSurf objects (TARGET=framebuffer) ==="
@@ -217,14 +217,25 @@ emcc -O2 -c "${X11APP}/mini_x11.c" -I"${X11APP}" -o /tmp/mini_x11.o
 emcc -O2 -c "${X11APP}/webx11_host_adapter.c" \
   -I"${X11APP}" -I"${PREFIX}/include" \
   -o /tmp/webx11_host_adapter.o
+# AgentOS proxy fetcher (wraps curl HTTP(S) registration; no NetSurf core edits)
+emcc -O2 -c "${X11APP}/netsurf_agentos_fetch.c" \
+  -I"${X11APP}" \
+  -I"${WS}/netsurf" \
+  -I"${WS}/netsurf/include" \
+  -I"${WS}/netsurf/frontends" \
+  -I"${PREFIX}/include" \
+  -Dnsframebuffer \
+  -o /tmp/netsurf_agentos_fetch.o
 
 # Whole-archive libnsfb so webx11 constructor registers the surface.
 emcc -O2 \
   "${OBJS[@]}" \
   /tmp/mini_x11.o \
   /tmp/webx11_host_adapter.o \
+  /tmp/netsurf_agentos_fetch.o \
   -L"${PREFIX}/lib" \
   -Wl,--whole-archive -lnsfb -Wl,--no-whole-archive \
+  -Wl,--wrap=fetch_curl_register \
   -lcss -ldom -lhubbub -lparserutils -lwapcaplet \
   -lnsgif -lnsbmp -lnsutils -lnspsl -lnslog \
   -lsvgtiny -lrosprite \
@@ -246,6 +257,7 @@ emcc -O2 \
   -sERROR_ON_UNDEFINED_SYMBOLS=0 \
   -sFORCE_FILESYSTEM=1 \
   --js-library "${X11APP}/x11_transport.js" \
+  --js-library "${X11APP}/netsurf_agentos_fetch.js" \
   --preload-file "${RES_STAGING}@/share/netsurf" \
   -o "${OUT}/netsurf_x11.js"
 

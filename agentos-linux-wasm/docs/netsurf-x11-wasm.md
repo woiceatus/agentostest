@@ -1,54 +1,46 @@
 # Original NetSurf on the in-tab JS XServer
 
+## Does XServer / WM / NetSurf run “in AgentOS” with syscalls & libs?
+
+**Yes — inside the AgentOS browser tab** — but **not** as native Linux processes.
+
+| Component | Runs as | “Syscalls / libs” meaning |
+|-----------|---------|---------------------------|
+| AgentOS shell / FS / `curl` | Browser tab + Workers | In-tab FS image; network via `/__agentos/ws` or `/__agentos/proxy` |
+| JS XServer (`node-x11`) | Main-thread JS | Real X11 wire protocol in JS (no Linux `Xorg`) |
+| Aurora WM | Emscripten WASM | Real WM logic; X I/O via `x11_js_*` JS bridge (not Unix sockets) |
+| Original NetSurf (`nsfb`) | Emscripten WASM | Real NetSurf + libcss/libdom/…; display via thin `webx11` → `PutImage`; **HTTP(S) via AgentOS proxy** (browser TLS) |
+
+There is **no Linux VM** and **no real kernel syscalls** for these clients. Emscripten provides wasm libc (`malloc`, MEMFS, `emscripten_sleep`/ASYNCIFY). X11 and network are **JS-bridged AgentOS services**.
+
 ## What runs today
 
 `public/wasm/x11-apps/netsurf_x11.{js,wasm,data}` is the **original NetSurf**
-framebuffer browser (`nsfb`), compiled with Emscripten, speaking real X11 into
-the JS XServer:
+framebuffer browser (`nsfb`), compiled with Emscripten:
 
-1. **Original NetSurf full package** — upstream `netsurf` + libcss/libdom/
-   libhubbub/libnsfb/… from the official NetSurf workspace  
-   (`wasm/vendor/netsurf-workspace/`, cloned via `ns-clone`)
-2. **Thin surface adapter only** — `libnsfb` surface `webx11`  
-   (`wasm/netsurf-webx11/webx11.c`) — RAM framebuffer + input queue  
-   **NetSurf browser core is not rewritten**
-3. **Thin X11 host hook** — `wasm/x11-apps/webx11_host_adapter.c`  
-   implements `webx11_host_present` / `webx11_host_poll` → `mini_x11`  
-   **`PutImage` ZPixmap** onto the JS XServer
+1. **Original NetSurf full package** — upstream workspace under  
+   `wasm/vendor/netsurf-workspace/` (gitignored; clone locally)
+2. **Thin `webx11` surface** — `wasm/netsurf-webx11/` (RAM fb + input)
+3. **Thin PutImage host** — `wasm/x11-apps/webx11_host_adapter.c`
+4. **Thin AgentOS HTTP(S) fetch** — `wasm/x11-apps/netsurf_agentos_fetch.{c,js}`  
+   wraps `fetch_curl_register` so http/https go through `/__agentos/proxy`  
+   (**no NetSurf core source edits**)
 
-Runtime args:
+## Open on start → DuckDuckGo
+
+`RealXDisplay` starts NetSurf with:
 
 ```text
-nsfb -f webx11 -w 720 -h 480 about:welcome
+nsfb -f webx11 -w 720 -h 480 https://html.duckduckgo.com/html/
 ```
+
+HTTPS is fetched by the browser through the AgentOS proxy, then fed into
+original NetSurf’s fetcher pipeline.
 
 ## Build
 
 ```bash
-# Once: clone official NetSurf workspace into wasm/vendor/netsurf-workspace
-# (ns-clone / env.sh from https://git.netsurf-browser.org/…)
-
 bash scripts/build-netsurf-original-wasm.sh
 # or
 bash scripts/build-netsurf-x11.sh
 ```
-
-Artifacts:
-
-- `public/wasm/x11-apps/netsurf_x11.js`
-- `public/wasm/x11-apps/netsurf_x11.wasm`
-- `public/wasm/x11-apps/netsurf_x11.data` (framebuffer Messages/CSS/welcome)
-
-## Runtime
-
-`RealXDisplay` starts Aurora WM, then xdemo/xclock, then loads original
-`netsurf_x11` and calls `callMain(["nsfb","-f","webx11",…,"about:welcome"])`.
-The framebuffer event loop yields via `emscripten_sleep` (ASYNCIFY) so the
-browser / XServer can keep painting.
-
-## Notes
-
-- HTTP fetch uses the wasm-built libcurl (HTTP-only in this tree). HTTPS sites
-  need SSL / browser-fetch wiring later; `about:welcome` works offline from
-  packed resources.
-- The old `ns_browser_wasm.c` DuckDuckGo shell is **not** used as NetSurf.
