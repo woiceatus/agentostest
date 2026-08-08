@@ -142,6 +142,17 @@ function keysymFromDomKey(event: KeyboardEvent): number | null {
       return 0xff56;
     case " ":
       return 0x20;
+    /* Modifiers — required so NetSurf host adapter can apply US shift map */
+    case "Shift":
+      return event.location === 2 ? 0xffe2 /* Shift_R */ : 0xffe1; /* Shift_L */
+    case "Control":
+      return event.location === 2 ? 0xffe4 /* Control_R */ : 0xffe3; /* Control_L */
+    case "Alt":
+      return event.location === 2 ? 0xffea /* Alt_R */ : 0xffe9; /* Alt_L */
+    case "Meta":
+      return event.location === 2 ? 0xffec /* Super_R */ : 0xffeb; /* Super_L */
+    case "CapsLock":
+      return 0xffe5;
     default:
       return null;
   }

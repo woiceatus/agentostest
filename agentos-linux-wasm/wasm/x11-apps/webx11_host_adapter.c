@@ -36,6 +36,9 @@ static int win_h = NS_H;
 static uint32_t xpixels[NS_W * NS_H];
 static int last_mx = -1;
 static int last_my = -1;
+/* Match vendor/x11 (node-x11) US evdev keymap Shift state. */
+static int shift_down;
+static int caps_lock;
 
 static int ensure_window(int width, int height)
 {
@@ -111,55 +114,71 @@ static void push_button(int button, int down)
 	webx11_push_event(&ev);
 }
 
-static int keycode_to_latin1(int keycode)
+/*
+ * Map JS XServer US keycodes → NSFB/latin1 (same layout as
+ * node_modules/x11/lib/xserver/keymap.js LAYOUT).
+ * Previous bug: 59/60/61 were mapped to ;/'/` instead of ,./.
+ */
+static int keycode_to_latin1(int keycode, int shifted)
 {
-	if (keycode >= 24 && keycode <= 33) {
-		static const char row[] = "qwertyuiop";
-		return row[keycode - 24];
-	}
-	if (keycode >= 38 && keycode <= 46) {
-		static const char row[] = "asdfghjkl";
-		return row[keycode - 38];
-	}
-	if (keycode >= 52 && keycode <= 58) {
-		static const char row[] = "zxcvbnm";
-		return row[keycode - 52];
-	}
-	if (keycode == 65)
-		return ' ';
-	if (keycode == 36)
-		return '\r';
-	if (keycode == 22)
-		return '\b';
-	if (keycode == 23)
-		return '\t';
-	if (keycode == 59)
-		return ';';
-	if (keycode == 60)
-		return '\'';
-	if (keycode == 61)
-		return '`';
-	if (keycode == 20)
-		return '-';
-	if (keycode == 21)
-		return '=';
-	if (keycode == 34)
-		return '[';
-	if (keycode == 35)
-		return ']';
-	if (keycode == 51)
-		return '\\';
-	if (keycode == 47)
-		return ';';
-	if (keycode == 48)
-		return '\'';
-	if (keycode == 49)
-		return '`';
-	if (keycode == 50)
-		return 0; /* Shift — ignored as char */
+	/* Digits / number-row punctuation */
 	if (keycode >= 10 && keycode <= 19) {
-		static const char row[] = "1234567890";
-		return row[keycode - 10];
+		static const char unshift[] = "1234567890";
+		static const char shift[] = "!@#$%^&*()";
+		return shifted ? shift[keycode - 10] : unshift[keycode - 10];
+	}
+	switch (keycode) {
+	case 20:
+		return shifted ? '_' : '-';
+	case 21:
+		return shifted ? '+' : '=';
+	case 22:
+		return '\b';
+	case 23:
+		return '\t';
+	case 34:
+		return shifted ? '{' : '[';
+	case 35:
+		return shifted ? '}' : ']';
+	case 36:
+		return '\r';
+	case 47:
+		return shifted ? ':' : ';';
+	case 48:
+		return shifted ? '"' : '\'';
+	case 49:
+		return shifted ? '~' : '`';
+	case 51:
+		return shifted ? '|' : '\\';
+	case 59:
+		return shifted ? '<' : ',';
+	case 60:
+		return shifted ? '>' : '.';
+	case 61:
+		return shifted ? '?' : '/';
+	case 65:
+		return ' ';
+	default:
+		break;
+	}
+	/* Letters — CapsLock XOR Shift */
+	{
+		int upper = shifted ^ (caps_lock != 0);
+		if (keycode >= 24 && keycode <= 33) {
+			static const char row[] = "qwertyuiop";
+			int ch = row[keycode - 24];
+			return upper ? ch - 'a' + 'A' : ch;
+		}
+		if (keycode >= 38 && keycode <= 46) {
+			static const char row[] = "asdfghjkl";
+			int ch = row[keycode - 38];
+			return upper ? ch - 'a' + 'A' : ch;
+		}
+		if (keycode >= 52 && keycode <= 58) {
+			static const char row[] = "zxcvbnm";
+			int ch = row[keycode - 52];
+			return upper ? ch - 'a' + 'A' : ch;
+		}
 	}
 	return 0;
 }
@@ -183,13 +202,29 @@ void webx11_host_poll(void)
 			push_button(ev.detail, 0);
 			break;
 		case X_KeyPress: {
-			int ch = keycode_to_latin1(ev.detail);
+			int kc = ev.detail;
+			if (kc == 50 || kc == 62) {
+				shift_down = 1;
+				break;
+			}
+			if (kc == 66) {
+				caps_lock = !caps_lock;
+				break;
+			}
+			int ch = keycode_to_latin1(kc, shift_down);
 			if (ch)
 				push_key(ch, 1);
 			break;
 		}
 		case X_KeyRelease: {
-			int ch = keycode_to_latin1(ev.detail);
+			int kc = ev.detail;
+			if (kc == 50 || kc == 62) {
+				shift_down = 0;
+				break;
+			}
+			if (kc == 66)
+				break;
+			int ch = keycode_to_latin1(kc, shift_down);
 			if (ch)
 				push_key(ch, 0);
 			break;
