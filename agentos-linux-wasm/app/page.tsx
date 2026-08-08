@@ -8,7 +8,7 @@ import {
   type BrowserTerminalHandle,
   type ForegroundProcess,
 } from "./BrowserTerminal";
-import { WebDesktop } from "./WebDesktop";
+import { RealXDisplay } from "./RealXDisplay";
 
 type FileMap = Record<string, string>;
 type BinaryFileMap = Record<string, Uint8Array>;
@@ -76,13 +76,19 @@ const packageCatalog: PackageInfo[] = [
   {
     name: "xserver-web",
     version: "wasm compositor",
-    detail: "compiled Xserver WASM framebuffer + JS X11 protocol server (MapRequest, drawing, events)",
+    detail: "node-x11 JS XServer — real X11 wire protocol, compose() to canvas, MapRequest/drawing/events",
+    status: "loaded",
+  },
+  {
+    name: "x11-apps",
+    version: "xdemo+xclock",
+    detail: "Emscripten-compiled real X11 clients (CreateWindow/PolyFillRectangle/ImageText8) over in-tab DISPLAY",
     status: "loaded",
   },
   {
     name: "aurora-wm-web",
     version: "0.3 ecooxai",
-    detail: "compiled from github.com/ecooxai/aurora-wm — Terminal + Files + WM chrome, MapRequest",
+    detail: "optional Aurora WM WASM chrome (legacy path); startx now boots RealXDisplay + x11-apps",
     status: "loaded",
   },
   {
@@ -1006,7 +1012,10 @@ export default function Home() {
     const tokens = tokenize(raw);
     if (["startx", "xserver", "xserver-web", "aurora-wm"].includes(tokens[0] ?? "")) {
       setDesktopStartSignal((current) => current + 1);
-      terminal.writeBlock("starting real X11 protocol server + Aurora WM client on DISPLAY=:0", "system");
+      terminal.writeBlock(
+        "starting real in-tab XServer (node-x11) + compiled X11 WASM clients (xdemo, xclock)\ncanvas presents XServer.compose()/root.raster — not a fake painted UI",
+        "system",
+      );
       terminal.prompt(cwd);
       return;
     }
@@ -1117,10 +1126,9 @@ export default function Home() {
         </div>
       </header>
 
-      <WebDesktop
+      <RealXDisplay
         startSignal={desktopStartSignal}
         onRunning={setDesktopRunning}
-        workspaceFiles={files}
       />
 
       <section className="lab-grid" aria-label="AgentOS browser lab">

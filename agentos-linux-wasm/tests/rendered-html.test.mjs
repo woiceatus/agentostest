@@ -231,47 +231,37 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   xserver.xserver_render(1);
   assert.equal(xserver.xserver_is_running(), 1);
 
-  const desktopSource = await readFile(new URL("../app/WebDesktop.tsx", import.meta.url), "utf8");
-  assert.match(desktopSource, /x11\/lib\/xserver\/index\.js/);
-  assert.match(desktopSource, /SubstructureRedirect/);
-  assert.match(desktopSource, /MapRequest/);
-  assert.match(desktopSource, /server\.compose\(\)/);
-  assert.match(desktopSource, /aurora-wm-web\.wasm/);
-  assert.match(desktopSource, /aurora_map_request/);
-  assert.match(desktopSource, /aurora_pointer_move/);
-  assert.match(desktopSource, /startAuroraHtop/);
-  assert.match(desktopSource, /openDuckDuckGoHome/);
-  assert.match(desktopSource, /setPointerCapture/);
-  assert.match(desktopSource, /ecooxai\/aurora-wm/);
-  assert.match(desktopSource, /browserNavigator\.gpu/);
+  const realDisplay = await readFile(new URL("../app/RealXDisplay.tsx", import.meta.url), "utf8");
+  assert.match(realDisplay, /x11\/lib\/xserver\/index\.js/);
+  assert.match(realDisplay, /server\.compose\(\)/);
+  assert.match(realDisplay, /root\.raster/);
+  assert.match(realDisplay, /xdemo\.wasm/);
+  assert.match(realDisplay, /xclock\.wasm/);
+  assert.match(realDisplay, /createX11ByteTransport/);
+  assert.match(realDisplay, /injectButton/);
 
-  const htopBridge = await readFile(new URL("../app/auroraHtop.ts", import.meta.url), "utf8");
-  assert.match(htopBridge, /htop\.worker/);
-  assert.match(htopBridge, /createAnsiScreen/);
-  assert.match(htopBridge, /pushScreenToAuroraTerm/);
+  const transportSource = await readFile(new URL("../app/x11Transport.ts", import.meta.url), "utf8");
+  assert.match(transportSource, /createSyncStreamPair|Synchronous in-process duplex/);
 
-  const browseBridge = await readFile(new URL("../app/netsurfBrowse.ts", import.meta.url), "utf8");
-  assert.match(browseBridge, /html\.duckduckgo\.com/);
-  assert.match(browseBridge, /parseDuckDuckGoResults/);
-  assert.match(browseBridge, /__agentos\/proxy/);
+  const xdemoSource = await readFile(new URL("../wasm/x11-apps/xdemo.c", import.meta.url), "utf8");
+  assert.match(xdemoSource, /PolyFillRectangle|x_poly_fill_rect/);
+  assert.match(xdemoSource, /x_map_window/);
+  assert.match(xdemoSource, /X_ButtonPress/);
 });
 
-test("keeps the WM alive when WebGPU is unavailable", async () => {
-  const desktopSource = await readFile(
-    new URL("../app/WebDesktop.tsx", import.meta.url),
-    "utf8",
-  );
+test("startx boots RealXDisplay with compose()-backed XServer", async () => {
   const pageSource = await readFile(
     new URL("../app/page.tsx", import.meta.url),
     "utf8",
   );
+  const realDisplay = await readFile(
+    new URL("../app/RealXDisplay.tsx", import.meta.url),
+    "utf8",
+  );
 
-  assert.match(desktopSource, /usage:\s*2\s*\|\s*4/);
-  assert.doesNotMatch(desktopSource, /usage:\s*4\s*\|\s*8/);
-  assert.match(desktopSource, /wasm\/xserver-web\.wasm/);
-  assert.match(desktopSource, /wasm-canvas2d/);
-  assert.match(desktopSource, /device\.pushErrorScope/);
-  assert.match(desktopSource, /device\.lost/);
   assert.match(pageSource, /useState\(1\)/);
-  assert.match(pageSource, /<WebDesktop[\s\S]*startSignal=\{desktopStartSignal\}/);
+  assert.match(pageSource, /<RealXDisplay[\s\S]*startSignal=\{desktopStartSignal\}/);
+  assert.match(pageSource, /compose\(\)\/root\.raster/);
+  assert.match(realDisplay, /Not a painted fake desktop/);
+  assert.match(realDisplay, /presentRoot/);
 });
