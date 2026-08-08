@@ -1,0 +1,17 @@
+{
+  "name": "AgentOS Linux WASM Demo",
+  "install": "rustup target add wasm32-unknown-unknown && npm run install:ci",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "npm run dev",
+      "description": "Vinext (Vite + Next.js RSC) dev server on http://localhost:5173"
+    }
+  ],
+  "ports": [
+    {
+      "name": "dev server",
+      "port": 5173
+    }
+  ]
+}
