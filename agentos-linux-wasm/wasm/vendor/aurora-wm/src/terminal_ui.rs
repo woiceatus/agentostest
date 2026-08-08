@@ -11,6 +11,13 @@ use std::io::Read;
 use std::os::fd::RawFd;
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+
+#[cfg(feature = "web")]
+extern "C" {
+    fn shell_js_write(id: i32, ptr: *const u8, len: usize) -> i32;
+    fn shell_js_read(id: i32, ptr: *mut u8, maxlen: usize) -> i32;
+    fn shell_js_resize(id: i32, cols: usize, rows: usize) -> i32;
+}
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::{Command, Stdio};
@@ -384,6 +391,10 @@ impl Aurora {
         }
         self.folder_terminal.scrollback = 0;
         self.write_folder_terminal(&bytes);
+        // Echo / command output is queued synchronously by the web shell;
+        // drain it immediately so typed characters appear without waiting
+        // for the next rAF pump.
+        let _ = self.poll_folder_terminal();
         Ok(())
     }
 
@@ -636,25 +647,40 @@ impl Aurora {
         let Some(fd) = self.folder_terminal.master_fd else {
             return;
         };
-        let mut winsize = libc::winsize {
-            ws_row: self.folder_terminal.rows as u16,
-            ws_col: self.folder_terminal.cols as u16,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            let _ = libc::ioctl(fd, libc::TIOCSWINSZ, &mut winsize);
-            let pgrp = libc::tcgetpgrp(fd);
-            if pgrp > 0 {
-                let _ = libc::kill(-pgrp, libc::SIGWINCH);
-            } else if let Some(pid) = self.folder_terminal.child_pid {
-                let _ = libc::kill(-pid, libc::SIGWINCH);
+        #[cfg(feature = "web")]
+        {
+            unsafe {
+                let _ = shell_js_resize(fd as i32, self.folder_terminal.cols, self.folder_terminal.rows);
+            }
+            return;
+        }
+        #[cfg(not(feature = "web"))]
+        {
+            let mut winsize = libc::winsize {
+                ws_row: self.folder_terminal.rows as u16,
+                ws_col: self.folder_terminal.cols as u16,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            unsafe {
+                let _ = libc::ioctl(fd, libc::TIOCSWINSZ, &mut winsize);
+                let pgrp = libc::tcgetpgrp(fd);
+                if pgrp > 0 {
+                    let _ = libc::kill(-pgrp, libc::SIGWINCH);
+                } else if let Some(pid) = self.folder_terminal.child_pid {
+                    let _ = libc::kill(-pid, libc::SIGWINCH);
+                }
             }
         }
     }
 
     pub(crate) fn write_folder_terminal(&mut self, bytes: &[u8]) {
         if let Some(fd) = self.folder_terminal.master_fd {
+            #[cfg(feature = "web")]
+            unsafe {
+                let _ = shell_js_write(fd as i32, bytes.as_ptr(), bytes.len());
+            }
+            #[cfg(not(feature = "web"))]
             unsafe {
                 let _ = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
             }
@@ -667,6 +693,19 @@ impl Aurora {
         };
         let mut changed = false;
         let mut buf = [0u8; 4096];
+        #[cfg(feature = "web")]
+        loop {
+            let n = unsafe { shell_js_read(fd as i32, buf.as_mut_ptr(), buf.len()) };
+            if n > 0 {
+                changed = true;
+                self.folder_terminal.scrollback = 0;
+                let text = String::from_utf8_lossy(&buf[..n as usize]).to_string();
+                self.feed_folder_terminal(&text);
+            } else {
+                break;
+            }
+        }
+        #[cfg(not(feature = "web"))]
         loop {
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n > 0 {

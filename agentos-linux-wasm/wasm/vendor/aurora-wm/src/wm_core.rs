@@ -612,6 +612,20 @@ impl Aurora {
             handled_event |= self.handle_motion_notify(ev)?;
         }
 
+        if self.folder_terminal.visible && self.poll_folder_terminal()? {
+            handled_event = true;
+        }
+        // Apply sync/async channel results (web fillers send immediately).
+        if self.poll_settings_data()? {
+            handled_event = true;
+        }
+        if self.poll_wifi_refresh()? {
+            handled_event = true;
+        }
+        if self.poll_clipboard_image_previews()? {
+            handled_event = true;
+        }
+
         if self.drag.is_some()
             || self.ui_resize.is_some()
             || self.pending_resize.is_some()
@@ -929,7 +943,9 @@ impl Aurora {
                 EventMask::EXPOSURE
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
-                    | EventMask::POINTER_MOTION,
+                    | EventMask::POINTER_MOTION
+                    | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE,
             )
             .cursor(self.cursor)
             .background_pixel(0)

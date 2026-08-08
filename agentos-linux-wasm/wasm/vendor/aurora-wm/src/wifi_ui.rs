@@ -88,16 +88,29 @@ impl Aurora {
         );
 
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let radio_enabled = read_wifi_radio_enabled();
-            let connected = read_connected_wifi();
-            let networks = radio_enabled.then(|| scan_wifi_networks(rescan));
+        #[cfg(feature = "web")]
+        {
+            let _ = rescan;
+            // No nmcli / threads in the browser build.
             let _ = tx.send(WifiRefreshResult {
-                radio_enabled,
-                connected,
-                networks,
+                radio_enabled: false,
+                connected: None,
+                networks: None,
             });
-        });
+        }
+        #[cfg(not(feature = "web"))]
+        {
+            thread::spawn(move || {
+                let radio_enabled = read_wifi_radio_enabled();
+                let connected = read_connected_wifi();
+                let networks = radio_enabled.then(|| scan_wifi_networks(rescan));
+                let _ = tx.send(WifiRefreshResult {
+                    radio_enabled,
+                    connected,
+                    networks,
+                });
+            });
+        }
         self.wifi_refresh_rx = Some(rx);
     }
 

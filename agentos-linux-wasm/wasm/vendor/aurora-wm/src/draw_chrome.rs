@@ -471,14 +471,27 @@ impl Aurora {
         let path = path.to_path_buf();
         self.clipboard_image_preview_pending.insert(path.clone());
         let tx = self.clipboard_image_preview_tx.clone();
-        thread::spawn(move || {
+        #[cfg(feature = "web")]
+        {
+            // Run inline — thread::spawn is unsupported on this WASM target.
             let preview = render_image_preview(
                 &path,
                 CLIPBOARD_MENU_IMAGE_PREVIEW_W,
                 CLIPBOARD_MENU_IMAGE_PREVIEW_H,
             );
             let _ = tx.send(ClipboardImagePreviewResult { path, preview });
-        });
+        }
+        #[cfg(not(feature = "web"))]
+        {
+            thread::spawn(move || {
+                let preview = render_image_preview(
+                    &path,
+                    CLIPBOARD_MENU_IMAGE_PREVIEW_W,
+                    CLIPBOARD_MENU_IMAGE_PREVIEW_H,
+                );
+                let _ = tx.send(ClipboardImagePreviewResult { path, preview });
+            });
+        }
     }
 
     pub(crate) fn poll_clipboard_image_previews(&mut self) -> AnyResult<bool> {

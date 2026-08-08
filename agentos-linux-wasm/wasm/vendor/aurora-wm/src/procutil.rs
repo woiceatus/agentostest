@@ -149,6 +149,12 @@ pub(crate) fn spawn_detached(mut cmd: Command) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(feature = "web")]
+    {
+        // Browser build cannot spawn host processes or OS threads.
+        let _ = cmd;
+    }
+    #[cfg(not(feature = "web"))]
     if let Ok(mut child) = cmd.spawn() {
         thread::spawn(move || {
             let _ = child.wait();

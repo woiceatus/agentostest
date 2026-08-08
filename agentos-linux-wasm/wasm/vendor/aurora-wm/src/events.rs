@@ -426,6 +426,7 @@ impl Aurora {
             self.settings_front = true;
             self.folder_front = false;
             self.media_front = false;
+            self.folder_terminal.focused = false;
             self.raise_ui()?;
             self.handle_settings_click(event_x, event_y)?;
         } else if ev.event == self.ui.dock || pointer_target == self.ui.dock {
@@ -442,7 +443,22 @@ impl Aurora {
                 self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
             }
             self.handle_dock_click(event_x, event_y)?;
-        } else if ev.event == self.ui.folder {
+        } else if ev.event == self.ui.folder || pointer_target == self.ui.folder {
+            // Sync root GrabButton delivers here with ev.event==root first.
+            // Handle on the grab path (like dock/settings) so Home/Terminal/…
+            // do not depend on ReplayPointer reaching ui.folder.
+            let (folder_x, folder_y, _, _) = self.folder_geometry();
+            let (event_x, event_y) = if ev.event == self.ui.folder {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(folder_x),
+                    i32::from(ev.root_y) - i32::from(folder_y),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
             if ev.detail == 4 || ev.detail == 5 {
                 self.handle_folder_scroll(ev.detail)?;
                 self.conn.flush()?;
@@ -451,9 +467,17 @@ impl Aurora {
             self.folder_front = true;
             self.settings_front = false;
             self.media_front = false;
+            // Typing goes to the terminal only after it is explicitly focused.
+            if !(self.folder_terminal.visible && self.folder_terminal.focused) {
+                self.folder_terminal.focused = false;
+            }
             self.raise_ui()?;
             if ev.detail == 1
-                && self.ui_bottom_right_resize_hit(UiResizeTarget::Folder, ev.event_x, ev.event_y)
+                && self.ui_bottom_right_resize_hit(
+                    UiResizeTarget::Folder,
+                    event_x as i16,
+                    event_y as i16,
+                )
             {
                 self.pending_ui_resize = Some(PendingUiResize {
                     target: UiResizeTarget::Folder,
@@ -464,11 +488,24 @@ impl Aurora {
                 return Ok(());
             }
             if ev.detail == 3 {
-                self.handle_folder_context(i32::from(ev.event_x), i32::from(ev.event_y))?;
+                self.handle_folder_context(event_x, event_y)?;
             } else {
-                self.handle_folder_click(ev)?;
+                self.handle_folder_click(event_x, event_y, ev.root_x, ev.root_y)?;
             }
-        } else if ev.event == self.ui.folder_terminal {
+        } else if ev.event == self.ui.folder_terminal || pointer_target == self.ui.folder_terminal
+        {
+            let (term_x, term_y, _, _) = self.folder_terminal_geometry();
+            let (event_x, event_y) = if ev.event == self.ui.folder_terminal {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(term_x),
+                    i32::from(ev.root_y) - i32::from(term_y),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
             if ev.detail == 4 || ev.detail == 5 {
                 self.handle_folder_terminal_scroll(ev.detail)?;
                 self.conn.flush()?;
@@ -487,8 +524,8 @@ impl Aurora {
             if ev.detail == 1
                 && self.ui_bottom_right_resize_hit(
                     UiResizeTarget::FolderTerminal,
-                    ev.event_x,
-                    ev.event_y,
+                    event_x as i16,
+                    event_y as i16,
                 )
             {
                 self.pending_ui_resize = Some(PendingUiResize {
@@ -499,7 +536,7 @@ impl Aurora {
                 });
                 return Ok(());
             }
-            self.handle_folder_terminal_click(i32::from(ev.event_x), i32::from(ev.event_y))?;
+            self.handle_folder_terminal_click(event_x, event_y)?;
             self.redraw_folder_terminal()?;
         } else if ev.event == self.ui.app_menu || pointer_target == self.ui.app_menu {
             let (menu_x, menu_y, _, _) = self.app_menu_geometry();
@@ -515,17 +552,67 @@ impl Aurora {
                 self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
             }
             self.handle_app_menu_click(ev.detail, event_x, event_y)?;
-        } else if ev.event == self.ui.aurora_menu {
-            self.handle_aurora_menu_click(i32::from(ev.event_x), i32::from(ev.event_y))?;
-        } else if ev.event == self.ui.clipboard_menu {
-            self.handle_clipboard_menu_press(
-                ev.detail,
-                i32::from(ev.event_x),
-                i32::from(ev.event_y),
-            )?;
-        } else if ev.event == self.ui.dock_more_menu {
-            self.handle_dock_more_menu_click(i32::from(ev.event_x), i32::from(ev.event_y))?;
-        } else if let Some(slot) = self.media_slot_for_window(ev.event) {
+        } else if ev.event == self.ui.aurora_menu || pointer_target == self.ui.aurora_menu {
+            let (menu_x, menu_y, _, _) = self.aurora_menu_geometry();
+            let (event_x, event_y) = if ev.event == self.ui.aurora_menu {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(menu_x),
+                    i32::from(ev.root_y) - i32::from(menu_y),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
+            self.handle_aurora_menu_click(event_x, event_y)?;
+        } else if ev.event == self.ui.clipboard_menu || pointer_target == self.ui.clipboard_menu {
+            let (menu_x, menu_y, _, _) = self.clipboard_menu_geometry();
+            let (event_x, event_y) = if ev.event == self.ui.clipboard_menu {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(menu_x),
+                    i32::from(ev.root_y) - i32::from(menu_y),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
+            self.handle_clipboard_menu_press(ev.detail, event_x, event_y)?;
+        } else if ev.event == self.ui.dock_more_menu || pointer_target == self.ui.dock_more_menu {
+            let (menu_x, menu_y, _, _) = self.dock_more_menu_geometry();
+            let (event_x, event_y) = if ev.event == self.ui.dock_more_menu {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(menu_x),
+                    i32::from(ev.root_y) - i32::from(menu_y),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
+            self.handle_dock_more_menu_click(event_x, event_y)?;
+        } else if let Some(slot) = self
+            .media_slot_for_window(ev.event)
+            .or_else(|| self.media_slot_for_window(pointer_target))
+        {
+            let Some(media_win) = self.ui.media.get(slot).copied() else {
+                return Ok(());
+            };
+            let (mx, my, _, _) = self.media_geometry(slot);
+            let (event_x, event_y) = if ev.event == media_win {
+                (i32::from(ev.event_x), i32::from(ev.event_y))
+            } else {
+                (
+                    i32::from(ev.root_x) - i32::from(mx),
+                    i32::from(ev.root_y) - i32::from(my),
+                )
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
             if ev.detail == 4 || ev.detail == 5 {
                 self.handle_media_scroll(slot, ev.detail)?;
                 self.conn.flush()?;
@@ -536,29 +623,45 @@ impl Aurora {
             self.settings_front = false;
             self.folder_front = false;
             self.conn
-                .set_input_focus(InputFocus::POINTER_ROOT, ev.event, CURRENT_TIME)?;
-            self.handle_media_click(
-                slot,
-                ev.detail,
-                i32::from(ev.event_x),
-                i32::from(ev.event_y),
-            )?;
-        } else if ev.event == self.ui.topbar {
-            let x = i32::from(ev.event_x);
+                .set_input_focus(InputFocus::POINTER_ROOT, media_win, CURRENT_TIME)?;
+            self.handle_media_click(slot, ev.detail, event_x, event_y)?;
+        } else if ev.event == self.ui.topbar || pointer_target == self.ui.topbar {
+            let x = if ev.event == self.ui.topbar {
+                i32::from(ev.event_x)
+            } else {
+                i32::from(ev.root_x)
+            };
+            if ev.detail == 1 {
+                self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
+            }
             let _ = self.handle_topbar_press_x(x)?;
-        } else if ev.event == self.root {
-            self.hide_aurora_menu()?;
-            self.handle_root_button_press(ev)?;
-        } else if let Some(client) = self.client_or_ancestor_key_for(ev.event) {
-            if self
-                .clients
-                .get(&client)
-                .is_some_and(|info| info.frame == ev.event)
-            {
-                self.handle_frame_click(client, ev)?;
+        } else if let Some(client) = self.client_or_ancestor_key_for(if ev.event == self.root {
+            pointer_target
+        } else {
+            ev.event
+        }) {
+            let Some(info) = self.clients.get(&client).copied() else {
+                return Ok(());
+            };
+            // Titlebar / frame chrome: handle on Sync-grab path so close/min/max
+            // work without waiting for ReplayPointer to the frame window.
+            if ev.event == info.frame || pointer_target == info.frame {
+                let mut frame_ev = ev;
+                frame_ev.event = info.frame;
+                if ev.event != info.frame {
+                    frame_ev.event_x = ev.root_x.saturating_sub(info.x);
+                    frame_ev.event_y = ev.root_y.saturating_sub(info.y);
+                }
+                self.handle_frame_click(client, frame_ev)?;
+            } else if ev.event == self.root {
+                self.hide_aurora_menu()?;
+                self.handle_root_button_press(ev)?;
             } else {
                 self.handle_client_click(client, ev)?;
             }
+        } else if ev.event == self.root {
+            self.hide_aurora_menu()?;
+            self.handle_root_button_press(ev)?;
         }
         self.conn.flush()?;
         Ok(())
@@ -1110,14 +1213,16 @@ impl Aurora {
             self.conn.allow_events(Allow::REPLAY_POINTER, ev.time)?;
             return Ok(());
         }
+        // Match hover_title_button() hit boxes (wider than the painted circles)
+        // so close/min/max register reliably on the web Sync-grab path.
         let x = ev.event_x;
-        if (12..=26).contains(&x) {
+        if (8..=28).contains(&x) {
             self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
             self.close_client(client)?;
-        } else if (34..=50).contains(&x) {
+        } else if (31..=53).contains(&x) {
             self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
             self.minimize_client(client)?;
-        } else if (57..=73).contains(&x) {
+        } else if (54..=76).contains(&x) {
             self.conn.allow_events(Allow::ASYNC_POINTER, ev.time)?;
             self.toggle_maximize_client(client)?;
         } else {
@@ -1190,6 +1295,15 @@ impl Aurora {
                 let title_h = self.titlebar_height(&info) as i16;
                 let frame_x = pointer.root_x.saturating_sub(info.x);
                 let frame_y = pointer.root_y.saturating_sub(info.y);
+                // Fallback: titlebar chrome on the root-grab path (if the
+                // pointer_target branch above was skipped for any reason).
+                if title_h > 0 && frame_y >= 0 && frame_y < title_h && target == info.frame {
+                    let mut frame_ev = ev;
+                    frame_ev.event = info.frame;
+                    frame_ev.event_x = frame_x;
+                    frame_ev.event_y = frame_y;
+                    return self.handle_frame_click(client, frame_ev);
+                }
                 if let Some(edges) =
                     resize_corner_edges_for_frame(&info, title_h as u16, frame_x, frame_y)
                 {

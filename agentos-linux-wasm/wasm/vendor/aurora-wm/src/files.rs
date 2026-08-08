@@ -256,39 +256,69 @@ pub(crate) fn folder_path_for(mode: FolderMode) -> PathBuf {
 }
 
 pub(crate) fn folder_entries_in(path: PathBuf, sort: FolderSort) -> Vec<FolderEntry> {
-    let mut entries = Vec::new();
-    let mut other_count = 0usize;
-    let Ok(read_dir) = fs::read_dir(&path) else {
-        return entries;
-    };
-    for entry in read_dir.flatten() {
-        let entry_path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
+    #[cfg(feature = "web")]
+    {
+        // Browser has no real home FS; mirror the web shell virtual layout.
+        let mut entries = Vec::new();
+        let home = PathBuf::from("/home/web_user");
+        if path == home {
+            for (name, kind) in [
+                ("Documents", FileKind::Directory),
+                ("Downloads", FileKind::Directory),
+                ("README.txt", FileKind::Other),
+            ] {
+                entries.push(FolderEntry {
+                    name: name.to_string(),
+                    path: home.join(name),
+                    kind,
+                });
+            }
+        } else if path == home.join("Documents") {
+            entries.push(FolderEntry {
+                name: "notes.txt".to_string(),
+                path: path.join("notes.txt"),
+                kind: FileKind::Other,
+            });
         }
-        let kind = if entry.file_type().is_ok_and(|ty| ty.is_dir()) {
-            FileKind::Directory
-        } else {
-            file_kind_for(&entry_path)
+        sort_folder_entries(&mut entries, sort);
+        return entries;
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        let mut entries = Vec::new();
+        let mut other_count = 0usize;
+        let Ok(read_dir) = fs::read_dir(&path) else {
+            return entries;
         };
-        if kind == FileKind::Other {
-            if other_count >= FOLDER_OTHER_ENTRY_LIMIT {
+        for entry in read_dir.flatten() {
+            let entry_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
                 continue;
             }
-            other_count += 1;
+            let kind = if entry.file_type().is_ok_and(|ty| ty.is_dir()) {
+                FileKind::Directory
+            } else {
+                file_kind_for(&entry_path)
+            };
+            if kind == FileKind::Other {
+                if other_count >= FOLDER_OTHER_ENTRY_LIMIT {
+                    continue;
+                }
+                other_count += 1;
+            }
+            entries.push(FolderEntry {
+                name,
+                path: entry_path,
+                kind,
+            });
+            if entries.len() >= FOLDER_ENTRY_LIMIT {
+                break;
+            }
         }
-        entries.push(FolderEntry {
-            name,
-            path: entry_path,
-            kind,
-        });
-        if entries.len() >= FOLDER_ENTRY_LIMIT {
-            break;
-        }
+        sort_folder_entries(&mut entries, sort);
+        entries
     }
-    sort_folder_entries(&mut entries, sort);
-    entries
 }
 
 pub(crate) fn sort_folder_entries(entries: &mut [FolderEntry], sort: FolderSort) {
@@ -326,79 +356,100 @@ pub(crate) fn entry_size(entry: &FolderEntry) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "web")]
+extern "C" {
+    fn shell_js_spawn(cwd: *const u8, cwd_len: usize, cols: usize, rows: usize) -> i32;
+}
+
 pub(crate) fn spawn_terminal_pty(cwd: &Path, cols: usize, rows: usize) -> AnyResult<(RawFd, libc::pid_t)> {
-    let mut master: libc::c_int = -1;
-    let mut slave: libc::c_int = -1;
-    let mut winsize = libc::winsize {
-        ws_row: rows as u16,
-        ws_col: cols as u16,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &mut winsize,
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
+    #[cfg(feature = "web")]
+    {
+        let cwd_str = cwd.to_string_lossy();
+        let cwd_bytes = cwd_str.as_bytes();
+        let id = unsafe {
+            shell_js_spawn(cwd_bytes.as_ptr(), cwd_bytes.len(), cols, rows)
+        };
+        if id <= 0 {
+            return Err("web shell spawn failed".into());
         }
-        return Err(std::io::Error::last_os_error().into());
+        // Reuse RawFd slot as the JS shell session id (positive).
+        return Ok((id as RawFd, 0));
     }
-    if pid == 0 {
-        unsafe {
-            libc::close(master);
-            libc::setsid();
-            libc::ioctl(slave, libc::TIOCSCTTY, 0);
-            libc::dup2(slave, libc::STDIN_FILENO);
-            libc::dup2(slave, libc::STDOUT_FILENO);
-            libc::dup2(slave, libc::STDERR_FILENO);
-            if slave > libc::STDERR_FILENO {
+    #[cfg(not(feature = "web"))]
+    {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let mut winsize = libc::winsize {
+            ws_row: rows as u16,
+            ws_col: cols as u16,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut winsize,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            unsafe {
+                libc::close(master);
                 libc::close(slave);
             }
+            return Err(std::io::Error::last_os_error().into());
         }
-        let _ = env::set_current_dir(cwd);
+        if pid == 0 {
+            unsafe {
+                libc::close(master);
+                libc::setsid();
+                libc::ioctl(slave, libc::TIOCSCTTY, 0);
+                libc::dup2(slave, libc::STDIN_FILENO);
+                libc::dup2(slave, libc::STDOUT_FILENO);
+                libc::dup2(slave, libc::STDERR_FILENO);
+                if slave > libc::STDERR_FILENO {
+                    libc::close(slave);
+                }
+            }
+            let _ = env::set_current_dir(cwd);
+            unsafe {
+                env::set_var("TERM", "xterm-256color");
+                env::set_var("COLORTERM", "truecolor");
+                env::set_var("LINES", rows.to_string());
+                env::set_var("COLUMNS", cols.to_string());
+                env::set_var("PS1", "$ ");
+                env::set_var("ENV", "/dev/null");
+                env::set_var("BASH_ENV", "/dev/null");
+            }
+            let shell_c = CString::new("/bin/bash").unwrap();
+            let arg1 = CString::new("--norc").unwrap();
+            let arg2 = CString::new("--noprofile").unwrap();
+            unsafe {
+                libc::execlp(
+                    shell_c.as_ptr(),
+                    shell_c.as_ptr(),
+                    arg1.as_ptr(),
+                    arg2.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(127);
+            }
+        }
         unsafe {
-            env::set_var("TERM", "xterm-256color");
-            env::set_var("COLORTERM", "truecolor");
-            env::set_var("LINES", rows.to_string());
-            env::set_var("COLUMNS", cols.to_string());
-            env::set_var("PS1", "$ ");
-            env::set_var("ENV", "/dev/null");
-            env::set_var("BASH_ENV", "/dev/null");
+            libc::close(slave);
+            let flags = libc::fcntl(master, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
         }
-        let shell_c = CString::new("/bin/bash").unwrap();
-        let arg1 = CString::new("--norc").unwrap();
-        let arg2 = CString::new("--noprofile").unwrap();
-        unsafe {
-            libc::execlp(
-                shell_c.as_ptr(),
-                shell_c.as_ptr(),
-                arg1.as_ptr(),
-                arg2.as_ptr(),
-                std::ptr::null::<libc::c_char>(),
-            );
-            libc::_exit(127);
-        }
+        Ok((master, pid))
     }
-    unsafe {
-        libc::close(slave);
-        let flags = libc::fcntl(master, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-    Ok((master, pid))
 }
 
 pub(crate) fn shell_quote(path: &Path) -> String {
@@ -423,9 +474,16 @@ pub(crate) fn file_kind_for(path: &std::path::Path) -> FileKind {
 }
 
 pub(crate) fn home_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    #[cfg(feature = "web")]
+    {
+        return PathBuf::from("/home/web_user");
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"))
+    }
 }
 
 pub(crate) fn place_entries() -> Vec<PlaceEntry> {

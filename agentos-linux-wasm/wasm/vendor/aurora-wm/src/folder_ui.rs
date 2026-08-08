@@ -118,9 +118,13 @@ impl Aurora {
         Ok(())
     }
 
-    pub(crate) fn handle_folder_click(&mut self, ev: ButtonPressEvent) -> AnyResult<()> {
-        let x = i32::from(ev.event_x);
-        let y = i32::from(ev.event_y);
+    pub(crate) fn handle_folder_click(
+        &mut self,
+        x: i32,
+        y: i32,
+        root_x: i16,
+        root_y: i16,
+    ) -> AnyResult<()> {
         let (_, _, w, h) = self.folder_geometry();
         self.folder_press = None;
         if self.choose_file_mode {
@@ -238,8 +242,8 @@ impl Aurora {
         self.folder_drag = Some(entry.path.clone());
         self.folder_press = Some(FolderPress {
             entry: entry.clone(),
-            root_x: ev.root_x,
-            root_y: ev.root_y,
+            root_x,
+            root_y,
         });
         match entry.kind {
             FileKind::Directory => {
@@ -548,6 +552,8 @@ impl Aurora {
         if self.folder_terminal.visible {
             self.ensure_folder_terminal_pty();
             self.sync_folder_terminal_cwd();
+            // Drain any banner/prompt already queued by the web shell.
+            let _ = self.poll_folder_terminal();
             let terminal = self.folder_terminal_geometry();
             self.conn.configure_window(
                 self.ui.folder_terminal,

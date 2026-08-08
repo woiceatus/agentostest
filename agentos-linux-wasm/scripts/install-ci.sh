@@ -186,4 +186,12 @@ await writeFile(
   }, null, 2)}\n`,
 );
 NODE
+# Apply Sync GrabButton / AllowEvents(ReplayPointer) patch for real Aurora WM.
+patched_input="${SITES_PROJECT_ROOT}/vendor/x11/input.js"
+x11_input="${SITES_PROJECT_ROOT}/node_modules/x11/lib/xserver/input.js"
+if [[ -f "${patched_input}" && -f "${x11_input}" ]]; then
+  cp -f "${patched_input}" "${x11_input}"
+  echo "[sites] applied vendor/x11/input.js (AllowEvents ReplayPointer)"
+fi
+
 echo "[sites] npm ci passed and vinext is available"

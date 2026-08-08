@@ -172,8 +172,24 @@ impl Aurora {
             }
             return Ok(());
         }
-        if ev.event == self.ui.folder_terminal && self.folder_terminal.visible {
+        // Prefer the Files terminal when it owns keyboard focus, even if the
+        // KeyPress event window is root/focus-fallback (common on the web
+        // XServer after Sync pointer grabs shuffle focus).
+        if self.folder_terminal.visible
+            && self.folder_terminal.focused
+            && (ev.event == self.ui.folder_terminal
+                || ev.event == self.ui.folder
+                || ev.event == self.root
+                || ev.event == self.ui.topbar)
+        {
             self.handle_folder_terminal_key(ev)?;
+            let _ = self.poll_folder_terminal();
+            return Ok(());
+        }
+        if ev.event == self.ui.folder_terminal && self.folder_terminal.visible {
+            self.folder_terminal.focused = true;
+            self.handle_folder_terminal_key(ev)?;
+            let _ = self.poll_folder_terminal();
             return Ok(());
         }
         if let Some(slot) = self.media_slot_for_window(ev.event) {

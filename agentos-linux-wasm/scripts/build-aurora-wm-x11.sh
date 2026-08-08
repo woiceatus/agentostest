@@ -7,6 +7,7 @@ site_root="$(cd "${script_dir}/.." && pwd)"
 crate_dir="${site_root}/wasm/vendor/aurora-wm"
 out_dir="${site_root}/public/wasm/aurora-wm-x11"
 transport="${site_root}/wasm/x11-apps/x11_transport.js"
+shell_lib="${site_root}/wasm/x11-apps/aurora_shell.js"
 
 if [[ -f /tmp/emsdk/emsdk_env.sh ]]; then
   # shellcheck disable=SC1091
@@ -44,6 +45,7 @@ archive="${crate_dir}/target/wasm32-unknown-emscripten/release/libaurora_wm.a"
 echo "Wrapping with emcc JS glue + x11 transport…"
 emcc "${archive}" \
   --js-library "${transport}" \
+  --js-library "${shell_lib}" \
   -O2 \
   -fwasm-exceptions \
   -sENVIRONMENT=web \

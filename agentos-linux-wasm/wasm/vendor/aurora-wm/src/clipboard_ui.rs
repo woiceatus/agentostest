@@ -109,12 +109,20 @@ impl Aurora {
 
     pub(crate) fn start_clipboard_poll(&mut self) {
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let item = read_image_clipboard()
-                .map(|(path, sig)| ClipboardPollItem::Image(path, sig))
-                .or_else(|| read_text_clipboard().map(ClipboardPollItem::Text));
-            let _ = tx.send(ClipboardPollResult { item });
-        });
+        #[cfg(feature = "web")]
+        {
+            // No host clipboard tools / threads in the browser build.
+            let _ = tx.send(ClipboardPollResult { item: None });
+        }
+        #[cfg(not(feature = "web"))]
+        {
+            thread::spawn(move || {
+                let item = read_image_clipboard()
+                    .map(|(path, sig)| ClipboardPollItem::Image(path, sig))
+                    .or_else(|| read_text_clipboard().map(ClipboardPollItem::Text));
+                let _ = tx.send(ClipboardPollResult { item });
+            });
+        }
         self.clipboard_poll_rx = Some(rx);
     }
 

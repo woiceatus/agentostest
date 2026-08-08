@@ -681,6 +681,7 @@ impl Aurora {
         self.settings_front = false;
         self.folder_front = false;
         self.media_front = false;
+        self.folder_terminal.focused = false;
         self.conn.configure_window(
             info.frame,
             &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),

@@ -3,6 +3,7 @@
 import "./buffer-polyfill";
 import { useEffect, useRef, useState } from "react";
 import { XServer } from "x11/lib/xserver/index.js";
+import { createAuroraShellSession, type AuroraShellSession } from "./auroraShell";
 import { createX11ByteTransport, type X11ByteTransport } from "./x11Transport";
 
 const DISPLAY_WIDTH = 960;
@@ -21,8 +22,18 @@ type X11Server = {
   injectKey: (keycode: number, isPress: boolean) => void;
 };
 
+type AuroraShellHost = {
+  spawn: (cwd: string, cols: number, rows: number) => number;
+  write: (id: number, bytes: Uint8Array) => number;
+  read: (id: number, dest: Uint8Array) => number;
+  poll: (id: number) => number;
+  resize: (id: number, cols: number, rows: number) => void;
+  close: (id: number) => void;
+};
+
 type EmscriptenModule = {
   x11Transport?: X11ByteTransport;
+  auroraShell?: AuroraShellHost;
   _aurora_wm_start?: () => number;
   _aurora_wm_pump?: () => number;
   _aurora_wm_is_running?: () => number;
@@ -33,7 +44,42 @@ type EmscriptenModule = {
   _xclock_start?: () => number;
   _xclock_pump?: (now: number) => number;
   _xclock_is_running?: () => number;
+  _firefox_x11_start?: () => number;
+  _firefox_x11_pump?: () => number;
+  _firefox_x11_is_running?: () => number;
 };
+
+function createAuroraShellHost(): AuroraShellHost {
+  const sessions = new Map<number, AuroraShellSession>();
+  let nextId = 1;
+  return {
+    spawn(cwd, cols, rows) {
+      const id = nextId;
+      nextId += 1;
+      sessions.set(id, createAuroraShellSession({ cwd, cols, rows }));
+      return id;
+    },
+    write(id, bytes) {
+      const s = sessions.get(id);
+      if (!s) return -1;
+      s.write(bytes);
+      return bytes.byteLength;
+    },
+    read(id, dest) {
+      return sessions.get(id)?.read(dest) ?? 0;
+    },
+    poll(id) {
+      return sessions.get(id)?.poll() ?? 0;
+    },
+    resize(id, cols, rows) {
+      sessions.get(id)?.resize(cols, rows);
+    },
+    close(id) {
+      sessions.get(id)?.close();
+      sessions.delete(id);
+    },
+  };
+}
 
 type ModuleFactory = (options: Record<string, unknown>) => Promise<EmscriptenModule>;
 
@@ -59,12 +105,57 @@ function presentRoot(server: X11Server, image: ImageData, ctx: CanvasRenderingCo
   ctx.putImageData(image, 0, 0);
 }
 
-async function loadXApp(jsUrl: string, wasmUrl: string, transport: X11ByteTransport): Promise<EmscriptenModule> {
+function keysymFromDomKey(event: KeyboardEvent): number | null {
+  if (event.key.length === 1) {
+    const code = event.key.charCodeAt(0);
+    return code;
+  }
+  switch (event.key) {
+    case "Enter":
+      return 0xff0d;
+    case "Backspace":
+      return 0xff08;
+    case "Tab":
+      return 0xff09;
+    case "Escape":
+      return 0xff1b;
+    case "ArrowLeft":
+      return 0xff51;
+    case "ArrowUp":
+      return 0xff52;
+    case "ArrowRight":
+      return 0xff53;
+    case "ArrowDown":
+      return 0xff54;
+    case "Delete":
+      return 0xffff;
+    case "Home":
+      return 0xff50;
+    case "End":
+      return 0xff57;
+    case "PageUp":
+      return 0xff55;
+    case "PageDown":
+      return 0xff56;
+    case " ":
+      return 0x20;
+    default:
+      return null;
+  }
+}
+
+async function loadXApp(
+  jsUrl: string,
+  wasmUrl: string,
+  transport: X11ByteTransport,
+  extras?: Record<string, unknown>,
+): Promise<EmscriptenModule> {
   const imported = (await import(/* @vite-ignore */ jsUrl)) as { default: ModuleFactory };
   const mod = await imported.default({
     locateFile: (path: string) => (path.endsWith(".wasm") ? wasmUrl : path),
     print: (text: string) => console.log(`[x11-app] ${text}`),
     printErr: (text: string) => console.error(`[x11-app] ${text}`),
+    ...(extras || {}),
   });
   mod.x11Transport = transport;
   return mod;
@@ -83,6 +174,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
     let raf = 0;
     const transports: X11ByteTransport[] = [];
     let server: X11Server | null = null;
+    let auroraPump: (() => void) | null = null;
     const pushLog = (line: string) => setLog((prev) => [...prev.slice(-8), line]);
 
     const shell = shellRef.current;
@@ -94,6 +186,11 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       const x = Math.max(0, Math.min(DISPLAY_WIDTH - 1, Math.round(((event.clientX - bounds.left) * DISPLAY_WIDTH) / bounds.width)));
       const y = Math.max(0, Math.min(DISPLAY_HEIGHT - 1, Math.round(((event.clientY - bounds.top) * DISPLAY_HEIGHT) / bounds.height)));
       return { x, y };
+    };
+
+    /** Deliver DOM input to X, then immediately pump Aurora so Sync grab → AllowEvents → Replay runs before the next move. */
+    const afterInject = () => {
+      auroraPump?.();
     };
 
     const onDown = (event: PointerEvent) => {
@@ -109,12 +206,14 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       setPointer(p);
       server.injectPointerMove(p.x, p.y);
       server.injectButton(event.button + 1, true);
+      afterInject();
     };
     const onMove = (event: PointerEvent) => {
       if (!server) return;
       const p = map(event);
       setPointer(p);
       server.injectPointerMove(p.x, p.y);
+      afterInject();
     };
     const onUp = (event: PointerEvent) => {
       if (!server) return;
@@ -122,14 +221,36 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       setPointer(p);
       server.injectPointerMove(p.x, p.y);
       server.injectButton(event.button + 1, false);
+      afterInject();
+      try {
+        shell.releasePointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+    };
+    const onCancel = (event: PointerEvent) => {
+      if (!server) return;
+      const p = map(event);
+      setPointer(p);
+      server.injectPointerMove(p.x, p.y);
+      server.injectButton(event.button + 1, false);
+      afterInject();
     };
     const onKey = (event: KeyboardEvent, press: boolean) => {
       if (!server) return;
-      if (event.key.length !== 1 && event.key !== "Enter" && event.key !== "Backspace") return;
+      // Keep focus on the display shell so keydown keeps firing after clicks
+      // inside the canvas (which uses pointer-events: none on the canvas itself).
+      if (press && document.activeElement !== shell) {
+        shell.focus({ preventScroll: true });
+      }
+      const keysym = keysymFromDomKey(event);
+      if (keysym == null) return;
       event.preventDefault();
-      const keysym = event.key.length === 1 ? event.key.charCodeAt(0) : event.key === "Enter" ? 0xff0d : 0xff08;
-      const keycode = server.keymap.keycodeForKeysym(keysym <= 0xff ? keysym : keysym);
-      if (keycode) server.injectKey(keycode, press);
+      const keycode = server.keymap.keycodeForKeysym(keysym);
+      if (keycode) {
+        server.injectKey(keycode, press);
+        afterInject();
+      }
     };
     const onKeyDown = (e: KeyboardEvent) => onKey(e, true);
     const onKeyUp = (e: KeyboardEvent) => onKey(e, false);
@@ -138,6 +259,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
     shell.addEventListener("pointerdown", onDown);
     shell.addEventListener("pointermove", onMove);
     shell.addEventListener("pointerup", onUp);
+    shell.addEventListener("pointercancel", onCancel);
     shell.addEventListener("keydown", onKeyDown);
     shell.addEventListener("keyup", onKeyUp);
     shell.addEventListener("contextmenu", onContext);
@@ -153,20 +275,29 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       server = new XServer({ width: DISPLAY_WIDTH, height: DISPLAY_HEIGHT }) as unknown as X11Server;
       if (server.root) server.root.backgroundPixel = 0x0b1a22;
       pushLog("XServer in-tab · real X11 wire protocol (node-x11)");
+      pushLog("input: Sync GrabButton + AllowEvents(ReplayPointer) enabled");
 
       // WM must claim SubstructureRedirect before other clients MapWindow.
       setStatus("launching real Aurora WM (x11rb WASM)…");
       const wmTransport = createX11ByteTransport();
       transports.push(wmTransport);
       server.addClientStream(wmTransport.serverSide);
+      const auroraShell = createAuroraShellHost();
       const aurora = await loadXApp(
         new URL("/wasm/aurora-wm-x11/aurora_wm.js", window.location.origin).href,
         new URL("/wasm/aurora-wm-x11/aurora_wm.wasm", window.location.origin).href,
         wmTransport,
+        { auroraShell },
       );
       if (cancelled) return;
+      // Keep a live reference on the module instance for js-library FFI.
+      aurora.auroraShell = auroraShell;
       if (!aurora._aurora_wm_start?.()) throw new Error("aurora-wm failed X11 connect / become_wm");
+      auroraPump = () => {
+        aurora._aurora_wm_pump?.();
+      };
       pushLog("aurora-wm WASM: SubstructureRedirect + chrome (real ecooxai WM)");
+      pushLog("aurora Files terminal → web shell (ls/cd/cat/…; no host fork)");
 
       setStatus("launching compiled X11 clients (xdemo + xclock)…");
       const demoTransport = createX11ByteTransport();
@@ -175,7 +306,6 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       const xdemo = await loadXApp(new URL("/wasm/x11-apps/xdemo.js", window.location.origin).href, new URL("/wasm/x11-apps/xdemo.wasm", window.location.origin).href, demoTransport);
       if (cancelled) return;
       if (!xdemo._xdemo_start?.()) throw new Error("xdemo failed X11 connect/map");
-      // Let Aurora handle MapRequest framing before drawing continues.
       aurora._aurora_wm_pump?.();
       pushLog("xdemo WASM: CreateWindow + MapWindow → Aurora MapRequest");
 
@@ -188,7 +318,35 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       aurora._aurora_wm_pump?.();
       pushLog("xclock-demo WASM: second real X11 client managed by Aurora");
 
-      setStatus("running · Aurora WM + XServer.compose() · xdemo + xclock");
+      // Firefox X11 bridge: rebuilt Gecko will PutImage here; placeholder until libxul links.
+      let firefox: EmscriptenModule | null = null;
+      try {
+        const ffTransport = createX11ByteTransport();
+        transports.push(ffTransport);
+        server.addClientStream(ffTransport.serverSide);
+        firefox = await loadXApp(
+          new URL("/wasm/x11-apps/firefox_x11.js", window.location.origin).href,
+          new URL("/wasm/x11-apps/firefox_x11.wasm", window.location.origin).href,
+          ffTransport,
+        );
+        if (cancelled) return;
+        if (firefox._firefox_x11_start?.()) {
+          aurora._aurora_wm_pump?.();
+          pushLog("firefox_x11: X11 bridge mapped (Gecko rebuild → PutImage; see docs/firefox-x11-wasm.md)");
+        } else {
+          pushLog("firefox_x11: start failed (bridge present, not running)");
+          firefox = null;
+        }
+      } catch (err) {
+        pushLog(`firefox_x11: skipped · ${err instanceof Error ? err.message : "load error"}`);
+        firefox = null;
+      }
+
+      setStatus(
+        firefox
+          ? "running · Aurora WM + XServer · xdemo + xclock + firefox_x11 bridge"
+          : "running · Aurora WM + XServer.compose() · xdemo + xclock",
+      );
       onRunning(true);
       shell.focus({ preventScroll: true });
 
@@ -197,6 +355,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         aurora._aurora_wm_pump?.();
         xdemo._xdemo_pump?.();
         xclock._xclock_pump?.(Math.round(performance.now()));
+        firefox?._firefox_x11_pump?.();
         presentRoot(server, image, ctx);
         raf = requestAnimationFrame(pump);
       };
@@ -212,9 +371,11 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
+      auroraPump = null;
       shell.removeEventListener("pointerdown", onDown);
       shell.removeEventListener("pointermove", onMove);
       shell.removeEventListener("pointerup", onUp);
+      shell.removeEventListener("pointercancel", onCancel);
       shell.removeEventListener("keydown", onKeyDown);
       shell.removeEventListener("keyup", onKeyUp);
       shell.removeEventListener("contextmenu", onContext);
@@ -237,6 +398,10 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         <strong>aurora-wm</strong> (ecooxai, x11rb) is compiled to WASM and becomes the real window
         manager via SubstructureRedirect / MapRequest / reparent frames. Clients{" "}
         <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same server.
+        Pointer uses Sync GrabButton + ReplayPointer so titlebar drag / dock clicks work.
+        Files → Terminal uses the in-tab web shell (<code>ls</code>/<code>help</code>/…). Firefox is
+        rebuilt from source and mapped through an <strong>X11 bridge</strong> (not Puter&apos;s WebGL
+        chrome-demo) — see <code>docs/firefox-x11-wasm.md</code>.
       </p>
       <div ref={shellRef} className="web-display-shell" tabIndex={0} role="application" aria-label="Real X11 screen">
         <canvas ref={canvasRef} className="web-display-canvas" style={{ pointerEvents: "none" }} />
@@ -252,7 +417,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         <span>
           pointer {pointer.x},{pointer.y}
         </span>
-        <span>Aurora frames xdemo/xclock · drag titlebars</span>
+        <span>click / drag / type — Sync grab + ReplayPointer</span>
       </div>
       <ul className="boot-list" style={{ marginTop: 12 }}>
         {log.map((line) => (

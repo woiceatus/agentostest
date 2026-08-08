@@ -1131,6 +1131,7 @@ export default function Home() {
         onRunning={setDesktopRunning}
       />
 
+
       <section className="lab-grid" aria-label="AgentOS browser lab">
         <aside className="package-panel">
           <div className="panel-heading"><div><p className="eyebrow">IMAGE MANIFEST</p><h2>Packages</h2></div><span className="count-pill">{packageCatalog.length} entries</span></div>

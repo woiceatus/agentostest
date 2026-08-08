@@ -69,6 +69,61 @@ impl Aurora {
     /// The tab draws immediately from `settings_cache` (showing a loading
     /// hint when empty) and is redrawn when the fresh data arrives.
     pub(crate) fn request_settings_data(&mut self, tab: SettingsTab) {
+        // wasm32-unknown-emscripten (web) has no pthread support in this
+        // build: std::thread::spawn aborts with "failed to spawn thread".
+        // Fill the channel synchronously with host-safe stubs instead.
+        #[cfg(feature = "web")]
+        {
+            let tx = self.settings_data_tx.clone();
+            match tab {
+                SettingsTab::Audio => {
+                    if self.settings_data_pending & settings_pending::AUDIO == 0 {
+                        self.settings_data_pending |= settings_pending::AUDIO;
+                        let _ = tx.send(SettingsData::Audio {
+                            volume: Some(70),
+                            outputs: Vec::new(),
+                            inputs: Vec::new(),
+                        });
+                    }
+                }
+                SettingsTab::Network => {
+                    if self.settings_data_pending & settings_pending::NETWORK == 0 {
+                        self.settings_data_pending |= settings_pending::NETWORK;
+                        let _ = tx.send(SettingsData::Network(vec![
+                            "Web session (virtual)".to_string(),
+                            "iface: wasm0".to_string(),
+                            "status: connected".to_string(),
+                        ]));
+                    }
+                }
+                SettingsTab::Bluetooth => {
+                    if self.settings_data_pending & settings_pending::BLUETOOTH == 0 {
+                        self.settings_data_pending |= settings_pending::BLUETOOTH;
+                        let _ = tx.send(SettingsData::Bluetooth(vec![
+                            "No Bluetooth adapter (web)".to_string(),
+                        ]));
+                    }
+                }
+                SettingsTab::Startup => {
+                    if self.settings_data_pending & settings_pending::AUTOSTART == 0 {
+                        self.settings_data_pending |= settings_pending::AUTOSTART;
+                        let _ = tx.send(SettingsData::Autostart(vec![
+                            "None (web session)".to_string(),
+                        ]));
+                    }
+                }
+                SettingsTab::Power | SettingsTab::About => {
+                    if self.settings_data_pending & settings_pending::GPU == 0 {
+                        self.settings_data_pending |= settings_pending::GPU;
+                        let _ = tx.send(SettingsData::GpuUsage(Vec::new()));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        #[cfg(not(feature = "web"))]
         match tab {
             SettingsTab::Audio => {
                 if self.settings_data_pending & settings_pending::AUDIO == 0 {

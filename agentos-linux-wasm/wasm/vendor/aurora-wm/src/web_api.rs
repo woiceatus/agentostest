@@ -46,6 +46,11 @@ fn start_inner() -> AnyResult<()> {
 
     // Prefer non-composited path: JS XServer has no COMPOSITE extension.
     let mut app = Aurora::new(conn, display, &screen, screen_num, Some(false))?;
+    // Desktop build maps Settings at create time; keep the web session clean
+    // until the user opens it (Display / Power / dock gear).
+    app.settings_visible = false;
+    app.settings_front = false;
+    let _ = app.conn.unmap_window(app.ui.settings);
     app.scan_existing_windows()?;
     app.redraw_everything()?;
     app.conn.flush()?;

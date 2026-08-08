@@ -273,19 +273,27 @@ impl Aurora {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let Ok(mut child) = cmd.spawn() else {
+        #[cfg(feature = "web")]
+        {
+            let _ = cmd;
             return false;
-        };
-        thread::sleep(Duration::from_millis(120));
-        match child.try_wait() {
-            Ok(Some(status)) => status.success(),
-            Ok(None) => {
-                thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                true
+        }
+        #[cfg(not(feature = "web"))]
+        {
+            let Ok(mut child) = cmd.spawn() else {
+                return false;
+            };
+            thread::sleep(Duration::from_millis(120));
+            match child.try_wait() {
+                Ok(Some(status)) => status.success(),
+                Ok(None) => {
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    true
+                }
+                Err(_) => false,
             }
-            Err(_) => false,
         }
     }
 
