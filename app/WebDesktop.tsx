@@ -1,24 +1,12 @@
 "use client";
 
-import { Buffer as BrowserBuffer } from "buffer";
+import "./browser-globals";
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import x11 from "x11";
 import { XServer, createStreamPair } from "x11/lib/xserver/index.js";
 
 const DISPLAY_WIDTH = 960;
 const DISPLAY_HEIGHT = 540;
-
-type GlobalBrowser = typeof globalThis & {
-  Buffer?: typeof BrowserBuffer;
-  setImmediate?: (callback: (...args: unknown[]) => void, ...args: unknown[]) => number;
-};
-
-const browserGlobal = globalThis as GlobalBrowser;
-if (!browserGlobal.Buffer) browserGlobal.Buffer = BrowserBuffer;
-if (!browserGlobal.setImmediate) {
-  browserGlobal.setImmediate = ((callback: (...args: unknown[]) => void, ...args: unknown[]) =>
-    window.setTimeout(callback, 0, ...args)) as GlobalBrowser["setImmediate"];
-}
 
 type X11Event = {
   name?: string;
