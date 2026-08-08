@@ -44,8 +44,8 @@ fn start_inner() -> AnyResult<()> {
     become_wm(&conn, &screen)?;
     conn.set_selection_owner(wm_window, wm_s_atom, CURRENT_TIME)?;
 
-    // Prefer non-composited path: JS XServer has no COMPOSITE extension.
-    let mut app = Aurora::new(conn, display, &screen, screen_num, Some(false))?;
+    // JS XServer now advertises COMPOSITE — enable Aurora's light compositor.
+    let mut app = Aurora::new(conn, display, &screen, screen_num, Some(true))?;
     // Desktop build maps Settings at create time; keep the web session clean
     // until the user opens it (Display / Power / dock gear).
     app.settings_visible = false;

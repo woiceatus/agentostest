@@ -186,12 +186,25 @@ await writeFile(
   }, null, 2)}\n`,
 );
 NODE
-# Apply Sync GrabButton / AllowEvents(ReplayPointer) patch for real Aurora WM.
-patched_input="${SITES_PROJECT_ROOT}/vendor/x11/input.js"
-x11_input="${SITES_PROJECT_ROOT}/node_modules/x11/lib/xserver/input.js"
-if [[ -f "${patched_input}" && -f "${x11_input}" ]]; then
-  cp -f "${patched_input}" "${x11_input}"
-  echo "[sites] applied vendor/x11/input.js (AllowEvents ReplayPointer)"
+# Apply Sync GrabButton / AllowEvents(ReplayPointer) + full extension stack.
+x11_server_dir="${SITES_PROJECT_ROOT}/node_modules/x11/lib/xserver"
+if [[ -d "${x11_server_dir}" ]]; then
+  if [[ -f "${SITES_PROJECT_ROOT}/vendor/x11/input.js" ]]; then
+    cp -f "${SITES_PROJECT_ROOT}/vendor/x11/input.js" "${x11_server_dir}/input.js"
+    echo "[sites] applied vendor/x11/input.js (AllowEvents ReplayPointer)"
+  fi
+  if [[ -f "${SITES_PROJECT_ROOT}/vendor/x11/server.js" ]]; then
+    cp -f "${SITES_PROJECT_ROOT}/vendor/x11/server.js" "${x11_server_dir}/server.js"
+    echo "[sites] applied vendor/x11/server.js (COMPOSITE/RANDR/GLX stack)"
+  fi
+  if [[ -f "${SITES_PROJECT_ROOT}/vendor/x11/soft-gl-backend.js" ]]; then
+    cp -f "${SITES_PROJECT_ROOT}/vendor/x11/soft-gl-backend.js" "${x11_server_dir}/soft-gl-backend.js"
+  fi
+  if [[ -d "${SITES_PROJECT_ROOT}/vendor/x11/extensions" ]]; then
+    mkdir -p "${x11_server_dir}/extensions"
+    cp -f "${SITES_PROJECT_ROOT}/vendor/x11/extensions/"*.js "${x11_server_dir}/extensions/"
+    echo "[sites] applied vendor/x11/extensions (COMPOSITE XFIXES SHAPE DAMAGE RANDR GLX)"
+  fi
 fi
 
 echo "[sites] npm ci passed and vinext is available"

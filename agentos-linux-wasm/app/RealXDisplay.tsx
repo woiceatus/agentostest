@@ -344,8 +344,8 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
 
       setStatus(
         firefox
-          ? "running · Aurora WM + XServer · xdemo + xclock + firefox_x11 bridge"
-          : "running · Aurora WM + XServer.compose() · xdemo + xclock",
+          ? "running · Aurora WM + COMPOSITE/RANDR/GLX XServer · xdemo + xclock + firefox_x11"
+          : "running · Aurora WM + COMPOSITE/RANDR/GLX XServer · xdemo + xclock",
       );
       onRunning(true);
       shell.focus({ preventScroll: true });
@@ -396,9 +396,11 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       <p className="web-desktop-intro">
         Canvas = <code>XServer.compose()</code> → <code>root.raster</code>.{" "}
         <strong>aurora-wm</strong> (ecooxai, x11rb) is compiled to WASM and becomes the real window
-        manager via SubstructureRedirect / MapRequest / reparent frames. Clients{" "}
-        <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same server.
-        Pointer uses Sync GrabButton + ReplayPointer so titlebar drag / dock clicks work.
+        manager via SubstructureRedirect / MapRequest / reparent frames. The JS XServer now
+        advertises <strong>COMPOSITE</strong>, <strong>XFIXES</strong>, <strong>SHAPE</strong>,{" "}
+        <strong>DAMAGE</strong>, <strong>RANDR</strong>, and <strong>GLX</strong> (soft/WebGL).
+        Clients <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same
+        server. Pointer uses Sync GrabButton + ReplayPointer so titlebar drag / dock clicks work.
         Files → Terminal uses the in-tab web shell (<code>ls</code>/<code>help</code>/…). Firefox is
         rebuilt from source and mapped through an <strong>X11 bridge</strong> (not Puter&apos;s WebGL
         chrome-demo) — see <code>docs/firefox-x11-wasm.md</code>.

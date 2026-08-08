@@ -56,6 +56,8 @@ export default defineConfig(async () => {
         buffer: "buffer/",
         // Sync GrabButton + AllowEvents(ReplayPointer) needed by real Aurora WM.
         "x11/lib/xserver/input.js": path.resolve(projectRoot, "vendor/x11/input.js"),
+        // Full COMPOSITE / XFIXES / SHAPE / DAMAGE / RANDR / GLX stack.
+        "x11/lib/xserver/server.js": path.resolve(projectRoot, "vendor/x11/server.js"),
       },
     },
     optimizeDeps: {
@@ -68,9 +70,13 @@ export default defineConfig(async () => {
         "tmp-finished-roles-resistant.trycloudflare.com",
         ".trycloudflare.com",
       ],
-      ...(isCodexSeatbeltSandbox
-        ? { watch: { useFsEvents: false, usePolling: true } }
-        : {}),
+      watch: {
+        // Firefox/Gecko rebuild trees are huge; watching them exhausts inotify.
+        ignored: /(?:^|[\/\\])(?:\.git|node_modules|firefox-wasm|netsurf|\.sites-runtime|\.wrangler)(?:[\/\\]|$)/,
+        ...(isCodexSeatbeltSandbox
+          ? { useFsEvents: false, usePolling: true }
+          : {}),
+      },
     },
     plugins: [
       vinext(),
