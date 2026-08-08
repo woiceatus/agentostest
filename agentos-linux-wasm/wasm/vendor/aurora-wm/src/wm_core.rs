@@ -7,7 +7,9 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -64,7 +66,7 @@ use crate::files::*;
 
 impl Aurora {
     pub(crate) fn new(
-        conn: RustConnection,
+        conn: crate::WmConn,
         display: String,
         screen: &Screen,
         screen_num: usize,
@@ -589,6 +591,71 @@ impl Aurora {
                 self.loop_wait_timeout(handled_event, needs_pointer_poll, next_pointer_poll),
             );
         }
+    }
+
+    /// One non-blocking event-loop turn for the web/WASM host (rAF pump).
+    pub(crate) fn pump_once(&mut self) -> AnyResult<()> {
+        let mut handled_event = false;
+        let mut pending_motion = None;
+        while let Some(event) = self.conn.poll_for_event()? {
+            if let Event::MotionNotify(ev) = event {
+                pending_motion = Some(ev);
+            } else {
+                handled_event = true;
+                if let Some(ev) = pending_motion.take() {
+                    handled_event |= self.handle_motion_notify(ev)?;
+                }
+                self.handle_event(event)?;
+            }
+        }
+        if let Some(ev) = pending_motion.take() {
+            handled_event |= self.handle_motion_notify(ev)?;
+        }
+
+        if self.drag.is_some()
+            || self.ui_resize.is_some()
+            || self.pending_resize.is_some()
+            || self.pending_ui_resize.is_some()
+            || self.pending_client_drag.is_some()
+        {
+            let pointer = self.conn.query_pointer(self.root)?.reply()?;
+            let button_down = u16::from(pointer.mask) & u16::from(KeyButMask::BUTTON1) != 0;
+            if let Some(pending) = self.pending_client_drag {
+                if !button_down {
+                    self.pending_client_drag = None;
+                } else {
+                    let moved = (i32::from(pointer.root_x) - i32::from(pending.root_x)).abs() > 4
+                        || (i32::from(pointer.root_y) - i32::from(pending.root_y)).abs() > 4;
+                    if moved && self.drag.is_none() {
+                        self.pending_client_drag = None;
+                        self.start_drag(pending.client, pointer.root_x, pointer.root_y)?;
+                        handled_event = true;
+                    }
+                }
+            }
+            if self.drag.is_some() {
+                if button_down {
+                    handled_event |= self.update_drag_position(pointer.root_x, pointer.root_y)?;
+                } else {
+                    self.drag = None;
+                    let _ = self.conn.ungrab_pointer(CURRENT_TIME);
+                    handled_event = true;
+                }
+            }
+            if self.ui_resize.is_some() {
+                if button_down {
+                    handled_event |= self.update_ui_resize(pointer.root_x, pointer.root_y)?;
+                } else {
+                    self.end_drag()?;
+                    handled_event = true;
+                }
+            }
+        }
+
+        if handled_event {
+            self.conn.flush()?;
+        }
+        Ok(())
     }
 
     pub(crate) fn has_playing_internal_media(&self) -> bool {

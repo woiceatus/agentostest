@@ -235,6 +235,8 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   assert.match(realDisplay, /x11\/lib\/xserver\/index\.js/);
   assert.match(realDisplay, /server\.compose\(\)/);
   assert.match(realDisplay, /root\.raster/);
+  assert.match(realDisplay, /aurora-wm-x11\/aurora_wm\.wasm/);
+  assert.match(realDisplay, /_aurora_wm_start/);
   assert.match(realDisplay, /xdemo\.wasm/);
   assert.match(realDisplay, /xclock\.wasm/);
   assert.match(realDisplay, /createX11ByteTransport/);
@@ -262,6 +264,7 @@ test("startx boots RealXDisplay with compose()-backed XServer", async () => {
   assert.match(pageSource, /useState\(1\)/);
   assert.match(pageSource, /<RealXDisplay[\s\S]*startSignal=\{desktopStartSignal\}/);
   assert.match(pageSource, /compose\(\)\/root\.raster/);
-  assert.match(realDisplay, /Not a painted fake desktop/);
+  assert.match(realDisplay, /real Aurora WM|ecooxai/);
+  assert.match(realDisplay, /SubstructureRedirect/);
   assert.match(realDisplay, /presentRoot/);
 });

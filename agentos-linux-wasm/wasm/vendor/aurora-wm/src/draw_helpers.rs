@@ -7,7 +7,9 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -328,11 +330,11 @@ pub(crate) fn rounded_rect_shape_rects(
     rects
 }
 
-pub(crate) fn create_pointer_cursor(conn: &RustConnection, root: Window) -> AnyResult<Cursor> {
+pub(crate) fn create_pointer_cursor(conn: &crate::WmConn, root: Window) -> AnyResult<Cursor> {
     create_standard_left_ptr_cursor(conn).or_else(|_| create_pixmap_pointer_cursor(conn, root))
 }
 
-pub(crate) fn create_standard_left_ptr_cursor(conn: &RustConnection) -> AnyResult<Cursor> {
+pub(crate) fn create_standard_left_ptr_cursor(conn: &crate::WmConn) -> AnyResult<Cursor> {
     const XC_LEFT_PTR: u16 = 68;
 
     let font = conn.generate_id()?;
@@ -355,7 +357,7 @@ pub(crate) fn create_standard_left_ptr_cursor(conn: &RustConnection) -> AnyResul
     Ok(cursor)
 }
 
-pub(crate) fn create_pixmap_pointer_cursor(conn: &RustConnection, root: Window) -> AnyResult<Cursor> {
+pub(crate) fn create_pixmap_pointer_cursor(conn: &crate::WmConn, root: Window) -> AnyResult<Cursor> {
     let source = conn.generate_id()?;
     let mask = conn.generate_id()?;
     let source_gc = conn.generate_id()?;

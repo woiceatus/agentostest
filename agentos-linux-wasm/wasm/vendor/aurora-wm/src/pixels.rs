@@ -7,7 +7,9 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -350,7 +352,7 @@ pub(crate) fn render_image_preview(path: &std::path::Path, w: i32, h: i32) -> Op
     })
 }
 
-pub(crate) fn capture_screen_preview(conn: &RustConnection, root: Window) -> Option<ImagePreview> {
+pub(crate) fn capture_screen_preview(conn: &crate::WmConn, root: Window) -> Option<ImagePreview> {
     let (pixels, iw, ih) = capture_root_rgba(conn, root, 0, 0, u16::MAX, u16::MAX).ok()?;
     Some(ImagePreview {
         pixels,
@@ -361,7 +363,7 @@ pub(crate) fn capture_screen_preview(conn: &RustConnection, root: Window) -> Opt
 }
 
 pub(crate) fn capture_root_rgba(
-    conn: &RustConnection,
+    conn: &crate::WmConn,
     root: Window,
     x: i16,
     y: i16,

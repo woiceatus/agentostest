@@ -23,6 +23,10 @@ type X11Server = {
 
 type EmscriptenModule = {
   x11Transport?: X11ByteTransport;
+  _aurora_wm_start?: () => number;
+  _aurora_wm_pump?: () => number;
+  _aurora_wm_is_running?: () => number;
+  _aurora_wm_stop?: () => void;
   _xdemo_start?: () => number;
   _xdemo_pump?: () => number;
   _xdemo_is_running?: () => number;
@@ -149,15 +153,31 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       server = new XServer({ width: DISPLAY_WIDTH, height: DISPLAY_HEIGHT }) as unknown as X11Server;
       if (server.root) server.root.backgroundPixel = 0x0b1a22;
       pushLog("XServer in-tab · real X11 wire protocol (node-x11)");
-      setStatus("launching compiled X11 clients (xdemo + xclock)…");
 
+      // WM must claim SubstructureRedirect before other clients MapWindow.
+      setStatus("launching real Aurora WM (x11rb WASM)…");
+      const wmTransport = createX11ByteTransport();
+      transports.push(wmTransport);
+      server.addClientStream(wmTransport.serverSide);
+      const aurora = await loadXApp(
+        new URL("/wasm/aurora-wm-x11/aurora_wm.js", window.location.origin).href,
+        new URL("/wasm/aurora-wm-x11/aurora_wm.wasm", window.location.origin).href,
+        wmTransport,
+      );
+      if (cancelled) return;
+      if (!aurora._aurora_wm_start?.()) throw new Error("aurora-wm failed X11 connect / become_wm");
+      pushLog("aurora-wm WASM: SubstructureRedirect + chrome (real ecooxai WM)");
+
+      setStatus("launching compiled X11 clients (xdemo + xclock)…");
       const demoTransport = createX11ByteTransport();
       transports.push(demoTransport);
       server.addClientStream(demoTransport.serverSide);
       const xdemo = await loadXApp(new URL("/wasm/x11-apps/xdemo.js", window.location.origin).href, new URL("/wasm/x11-apps/xdemo.wasm", window.location.origin).href, demoTransport);
       if (cancelled) return;
       if (!xdemo._xdemo_start?.()) throw new Error("xdemo failed X11 connect/map");
-      pushLog("xdemo WASM: CreateWindow + MapWindow + drawing requests");
+      // Let Aurora handle MapRequest framing before drawing continues.
+      aurora._aurora_wm_pump?.();
+      pushLog("xdemo WASM: CreateWindow + MapWindow → Aurora MapRequest");
 
       const clockTransport = createX11ByteTransport();
       transports.push(clockTransport);
@@ -165,14 +185,16 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
       const xclock = await loadXApp(new URL("/wasm/x11-apps/xclock.js", window.location.origin).href, new URL("/wasm/x11-apps/xclock.wasm", window.location.origin).href, clockTransport);
       if (cancelled) return;
       if (!xclock._xclock_start?.()) throw new Error("xclock failed X11 connect/map");
-      pushLog("xclock-demo WASM: second real X11 client mapped");
+      aurora._aurora_wm_pump?.();
+      pushLog("xclock-demo WASM: second real X11 client managed by Aurora");
 
-      setStatus("running · XServer.compose() pixels · xdemo + xclock");
+      setStatus("running · Aurora WM + XServer.compose() · xdemo + xclock");
       onRunning(true);
       shell.focus({ preventScroll: true });
 
       const pump = () => {
         if (cancelled || !server) return;
+        aurora._aurora_wm_pump?.();
         xdemo._xdemo_pump?.();
         xclock._xclock_pump?.(Math.round(performance.now()));
         presentRoot(server, image, ctx);
@@ -205,15 +227,16 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
     <section className="web-desktop-panel" aria-label="Real in-browser X11 server">
       <div className="web-desktop-heading">
         <div>
-          <p className="eyebrow">REAL X11 · JS XServer · WASM CLIENTS</p>
-          <h2>Full in-tab X server (protocol + compose)</h2>
+          <p className="eyebrow">REAL X11 · AURORA WM · WASM CLIENTS</p>
+          <h2>Full in-tab X server + real Aurora WM</h2>
         </div>
         <span className={"desktop-status " + (status.startsWith("running") ? "running" : "")}>{status}</span>
       </div>
       <p className="web-desktop-intro">
-        Not a painted fake desktop. Canvas = <code>XServer.compose()</code> → <code>root.raster</code>.
-        Clients <strong>xdemo</strong> and <strong>xclock-demo</strong> are C programs (Emscripten) speaking
-        real X11: CreateWindow, MapWindow, PolyFillRectangle, ImageText8, ButtonPress.
+        Canvas = <code>XServer.compose()</code> → <code>root.raster</code>.{" "}
+        <strong>aurora-wm</strong> (ecooxai, x11rb) is compiled to WASM and becomes the real window
+        manager via SubstructureRedirect / MapRequest / reparent frames. Clients{" "}
+        <strong>xdemo</strong> and <strong>xclock-demo</strong> speak real X11 into the same server.
       </p>
       <div ref={shellRef} className="web-display-shell" tabIndex={0} role="application" aria-label="Real X11 screen">
         <canvas ref={canvasRef} className="web-display-canvas" style={{ pointerEvents: "none" }} />
@@ -229,7 +252,7 @@ export function RealXDisplay({ startSignal, onRunning }: RealXDisplayProps) {
         <span>
           pointer {pointer.x},{pointer.y}
         </span>
-        <span>click xdemo Toggle — ButtonPress from X server</span>
+        <span>Aurora frames xdemo/xclock · drag titlebars</span>
       </div>
       <ul className="boot-list" style={{ marginTop: 12 }}>
         {log.map((line) => (
