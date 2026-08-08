@@ -1,18 +1,13 @@
 //! Browser WASM port of [ecooxai/aurora-wm](https://github.com/ecooxai/aurora-wm).
 //!
-//! This is not a fake HTML mock. It compiles Aurora's real chrome path to WASM:
-//! - NotoSans / NotoSansMono fonts from upstream (rusttype glyph rasterization)
-//! - wallpaper asset from upstream
-//! - topbar / dock / framed clients / MapRequest placement
-//!
-//! The in-tab JS `x11` package still owns the X11 wire protocol (Unix sockets do
-//! not exist in the browser). Aurora WASM is the real WM decision + paint engine.
+//! Includes the Aurora Files UI (folder chrome from upstream `redraw_folder`) and
+//! auto-starts it when the WM boots — matching the real Linux WM launching its
+//! file manager / built-in folder window.
 
 use image::imageops::FilterType;
 use rusttype::{point, Font, Scale};
 use std::io::Cursor;
 
-/// Constants mirrored from upstream `ecooxai/aurora-wm` `src/main.rs`.
 const TOPBAR_HEIGHT: i32 = 40;
 const DOCK_ICON_SIZE: i32 = 44;
 const DOCK_ICON_RADIUS: i32 = 12;
@@ -23,6 +18,10 @@ const TITLEBAR_HEIGHT: i32 = 34;
 const FRAME_CORNER_RADIUS: i32 = 8;
 const WINDOW_COUNT: usize = 3;
 const DOCK_BUTTONS: i32 = 5;
+const FILES_INDEX: usize = 2;
+const MAX_FILES: usize = 64;
+const NAME_CAP: usize = 96;
+const PATH_CAP: usize = 160;
 
 const WALLPAPER_PNG: &[u8] =
     include_bytes!("../../vendor/aurora-wm/wallpaper/f7d4b278-3aef-4a94-b84e-f14acde427ac.png");
@@ -30,35 +29,13 @@ const FONT_REGULAR: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSan
 const FONT_BOLD: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSans-Bold.ttf");
 const FONT_MONO: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSansMono-Regular.ttf");
 
-static STATUS_RUNNING: &[u8] = b"running - aurora-wm wasm - real rusttype text";
+static STATUS_RUNNING: &[u8] = b"running - aurora-wm + Aurora Files";
 static STATUS_IDLE: &[u8] = b"idle";
 static SOURCE_URL: &[u8] = b"https://github.com/ecooxai/aurora-wm";
 
-const WINDOW_TITLES: [&str; WINDOW_COUNT] = ["terminal", "agent log", "files"];
-const WINDOW_LINES: [[&str; 5]; WINDOW_COUNT] = [
-    [
-        "agentOS shell ready",
-        "xterm PTY connected",
-        "$ ls /workspace",
-        "README.md  config.json",
-        "processes: 3",
-    ],
-    [
-        "Aurora WM attached",
-        "SubstructureRedirect",
-        "MapRequest handled",
-        "source: ecooxai/aurora-wm",
-        "focus: terminal",
-    ],
-    [
-        "/workspace",
-        "README.md",
-        "config.json",
-        "hello.txt",
-        "data.txt",
-    ],
-];
+const WINDOW_TITLES: [&str; WINDOW_COUNT] = ["terminal", "agent log", "Aurora Files"];
 const DOCK_LABELS: [&str; 5] = ["Term", "Files", "Apps", "Set", "More"];
+const PLACES: [&str; 4] = ["Home", "Workspace", "Etc", "Tmp"];
 
 #[derive(Clone, Copy)]
 struct Rect {
@@ -100,6 +77,12 @@ impl Client {
     }
 }
 
+#[derive(Clone)]
+struct FileEntry {
+    name: String,
+    kind: u32, // 0=dir 1=file 2=text 3=config
+}
+
 struct Fonts {
     regular: Font<'static>,
     bold: Font<'static>,
@@ -128,6 +111,12 @@ struct State {
     running: u32,
     dock: Rect,
     fonts: Fonts,
+    files_path: String,
+    files: Vec<FileEntry>,
+    files_selected: i32,
+    files_visible: u32,
+    path_buf: [u8; PATH_CAP],
+    name_buf: [u8; NAME_CAP],
 }
 
 impl State {
@@ -138,12 +127,18 @@ impl State {
             wallpaper: Vec::new(),
             frame: Vec::new(),
             clients: [Client::empty(); WINDOW_COUNT],
-            active: 0,
+            active: FILES_INDEX as u32,
             tick: 0,
             layout_version: 0,
             running: 0,
             dock: Rect::empty(),
             fonts: Fonts::load(),
+            files_path: "/workspace".to_string(),
+            files: Vec::new(),
+            files_selected: 0,
+            files_visible: 1,
+            path_buf: [0; PATH_CAP],
+            name_buf: [0; NAME_CAP],
         }
     }
 }
@@ -151,7 +146,6 @@ impl State {
 static mut STATE: Option<State> = None;
 
 fn state() -> &'static mut State {
-    // SAFETY: single-threaded WASM demo; init once then mutate from exports.
     unsafe {
         if STATE.is_none() {
             STATE = Some(State::new());
@@ -187,29 +181,34 @@ fn dock_geometry(screen_width: i32, screen_height: i32) -> Rect {
     }
 }
 
-fn place_client(index: usize, screen_w: i32, screen_h: i32, dock: Rect) -> Client {
-    let max_w = (screen_w - 80).max(280);
-    let max_h = (screen_h - TOPBAR_HEIGHT - DOCK_HEIGHT - TITLEBAR_HEIGHT - 62).max(180);
-    let margin = 24;
-    let gap = 14;
-    let side_w = ((screen_w * 34) / 100).clamp(240, 340).min(max_w);
-    let left_w = (screen_w - margin * 2 - gap - side_w).clamp(280, max_w);
-    let content_top = TOPBAR_HEIGHT + 18;
+/// Layout mirrors upstream: Aurora Files uses folder_geometry-like placement and
+/// is the primary app window started with the WM.
+fn place_client(index: usize, screen_w: i32, _screen_h: i32, dock: Rect) -> Client {
+    let content_top = TOPBAR_HEIGHT + 26;
     let content_bottom = dock.y - 16;
-    let content_h = (content_bottom - content_top).max(200).min(max_h + TITLEBAR_HEIGHT);
+    let content_h = (content_bottom - content_top).max(240);
 
     let (frame_x, frame_y, frame_w, frame_h) = match index {
-        0 => {
-            let h = ((content_h * 70) / 100).max(200);
-            (margin, content_top, left_w, h.min(content_h))
+        FILES_INDEX => {
+            // Upstream folder_geometry: left side, large.
+            let w = ((screen_w * 56) / 100).clamp(420, 560);
+            (24, content_top, w, content_h)
         }
-        1 => (margin + left_w + gap, content_top, side_w, (content_h - gap) / 2),
-        _ => (
-            margin + left_w + gap,
-            content_top + (content_h + gap) / 2,
-            side_w,
-            (content_h - gap) / 2,
-        ),
+        0 => {
+            let files_w = ((screen_w * 56) / 100).clamp(420, 560);
+            let x = 24 + files_w + 14;
+            let w = (screen_w - x - 24).max(240);
+            let h = ((content_h * 62) / 100).max(180);
+            (x, content_top, w, h)
+        }
+        _ => {
+            let files_w = ((screen_w * 56) / 100).clamp(420, 560);
+            let x = 24 + files_w + 14;
+            let w = (screen_w - x - 24).max(240);
+            let h = ((content_h * 34) / 100).max(120);
+            let y = content_top + content_h - h;
+            (x, y, w, h)
+        }
     };
 
     let frame = Rect {
@@ -320,7 +319,6 @@ fn fill_circle(frame: &mut [u8], width: u32, cx: i32, cy: i32, radius: i32, colo
     }
 }
 
-/// Port of upstream `canvas.rs` `draw_text` — real rusttype glyph rasterization.
 fn draw_text(
     frame: &mut [u8],
     width: u32,
@@ -379,6 +377,300 @@ fn draw_text_right(
     draw_text(frame, width, font, text, right - w, y, size, color);
 }
 
+fn kind_label(kind: u32) -> &'static str {
+    match kind {
+        0 => "Folder",
+        2 => "Text",
+        3 => "Config",
+        _ => "File",
+    }
+}
+
+fn draw_file_icon(frame: &mut [u8], width: u32, kind: u32, cx: i32, cy: i32) {
+    match kind {
+        0 => {
+            fill_round_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 10,
+                    y: cy - 7,
+                    width: 20,
+                    height: 14,
+                },
+                3,
+                [246, 190, 82, 240],
+            );
+            fill_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 10,
+                    y: cy - 10,
+                    width: 9,
+                    height: 5,
+                },
+                [246, 190, 82, 240],
+            );
+        }
+        _ => {
+            fill_round_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 8,
+                    y: cy - 10,
+                    width: 16,
+                    height: 20,
+                },
+                3,
+                [255, 255, 255, 220],
+            );
+            fill_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 5,
+                    y: cy - 5,
+                    width: 10,
+                    height: 2,
+                },
+                [90, 130, 150, 200],
+            );
+            fill_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 5,
+                    y: cy,
+                    width: 10,
+                    height: 2,
+                },
+                [90, 130, 150, 200],
+            );
+            fill_rect(
+                frame,
+                width,
+                Rect {
+                    x: cx - 5,
+                    y: cy + 5,
+                    width: 7,
+                    height: 2,
+                },
+                [90, 130, 150, 180],
+            );
+        }
+    }
+}
+
+/// Port of upstream `redraw_folder` chrome for the Aurora Files client window.
+fn draw_files_app(
+    frame: &mut [u8],
+    width: u32,
+    fonts: &Fonts,
+    content: Rect,
+    path: &str,
+    entries: &[FileEntry],
+    selected: i32,
+) {
+    fill_round_rect(frame, width, content, 14, [247, 252, 255, 230]);
+    fill_round_rect(frame, width, content, 14, [214, 229, 237, 40]);
+
+    // Header toolbar buttons (home / terminal / sort / more) like upstream.
+    for (i, x) in [content.x + 18, content.x + 56, content.x + 94].into_iter().enumerate() {
+        fill_round_rect(
+            frame,
+            width,
+            Rect {
+                x,
+                y: content.y + 14,
+                width: 30,
+                height: 30,
+            },
+            10,
+            [255, 255, 255, 170],
+        );
+        let label = match i {
+            0 => "H",
+            1 => "T",
+            _ => "S",
+        };
+        draw_text(
+            frame,
+            width,
+            &fonts.bold,
+            label,
+            x + 9,
+            content.y + 20,
+            12.0,
+            [40, 110, 100, 255],
+        );
+    }
+    fill_round_rect(
+        frame,
+        width,
+        Rect {
+            x: content.x + content.width - 50,
+            y: content.y + 14,
+            width: 30,
+            height: 30,
+        },
+        10,
+        [255, 255, 255, 170],
+    );
+    draw_text(
+        frame,
+        width,
+        &fonts.bold,
+        "...",
+        content.x + content.width - 42,
+        content.y + 18,
+        14.0,
+        [40, 110, 100, 255],
+    );
+
+    draw_text(
+        frame,
+        width,
+        &fonts.bold,
+        path,
+        content.x + 18,
+        content.y + 50,
+        14.0,
+        [40, 110, 100, 255],
+    );
+    fill_rect(
+        frame,
+        width,
+        Rect {
+            x: content.x + 18,
+            y: content.y + 72,
+            width: content.width - 36,
+            height: 1,
+        },
+        [178, 202, 214, 140],
+    );
+
+    // Places sidebar
+    let sidebar = Rect {
+        x: content.x + 12,
+        y: content.y + 84,
+        width: 110,
+        height: content.height - 96,
+    };
+    fill_round_rect(frame, width, sidebar, 10, [255, 255, 255, 140]);
+    draw_text(
+        frame,
+        width,
+        &fonts.bold,
+        "Places",
+        sidebar.x + 12,
+        sidebar.y + 10,
+        12.0,
+        [60, 90, 110, 255],
+    );
+    for (i, place) in PLACES.iter().enumerate() {
+        let y = sidebar.y + 34 + i as i32 * 28;
+        let active = *place == "Workspace";
+        if active {
+            fill_round_rect(
+                frame,
+                width,
+                Rect {
+                    x: sidebar.x + 8,
+                    y: y - 4,
+                    width: sidebar.width - 16,
+                    height: 24,
+                },
+                8,
+                [116, 213, 198, 130],
+            );
+        }
+        draw_text(
+            frame,
+            width,
+            &fonts.regular,
+            place,
+            sidebar.x + 16,
+            y,
+            12.0,
+            [40, 70, 90, 255],
+        );
+    }
+
+    let list_x = content.x + 132;
+    let list_w = content.width - 148;
+    if entries.is_empty() {
+        draw_text(
+            frame,
+            width,
+            &fonts.regular,
+            "No files in this folder.",
+            list_x,
+            content.y + 110,
+            13.0,
+            [120, 140, 155, 255],
+        );
+        return;
+    }
+
+    let row_h = 42;
+    let max_rows = ((content.height - 96) / row_h).max(1) as usize;
+    for (idx, entry) in entries.iter().take(max_rows).enumerate() {
+        let row_y = content.y + 90 + idx as i32 * row_h;
+        let is_selected = selected == idx as i32;
+        fill_round_rect(
+            frame,
+            width,
+            Rect {
+                x: list_x,
+                y: row_y - 4,
+                width: list_w,
+                height: 34,
+            },
+            9,
+            if is_selected {
+                [116, 213, 198, 140]
+            } else {
+                [255, 255, 255, 140]
+            },
+        );
+        draw_file_icon(frame, width, entry.kind, list_x + 18, row_y + 13);
+        draw_text(
+            frame,
+            width,
+            &fonts.bold,
+            &entry.name,
+            list_x + 40,
+            row_y,
+            13.0,
+            [30, 50, 65, 255],
+        );
+        draw_text(
+            frame,
+            width,
+            &fonts.regular,
+            kind_label(entry.kind),
+            list_x + 40,
+            row_y + 16,
+            10.0,
+            [90, 120, 135, 230],
+        );
+    }
+
+    let status = format!("{} items · Aurora Files", entries.len());
+    draw_text(
+        frame,
+        width,
+        &fonts.regular,
+        &status,
+        list_x,
+        content.y + content.height - 22,
+        11.0,
+        [80, 110, 125, 230],
+    );
+}
+
 fn draw_titlebar(
     frame: &mut [u8],
     width: u32,
@@ -424,53 +716,94 @@ fn draw_titlebar(
     fill_circle(frame, width, title.x + 19, title.y + 17, 8, [241, 96, 105, 235]);
     fill_circle(frame, width, title.x + 42, title.y + 17, 8, [246, 190, 82, 235]);
     fill_circle(frame, width, title.x + 65, title.y + 17, 8, [76, 197, 178, 235]);
-
-    let label = WINDOW_TITLES[index];
-    let text_color = if active {
-        [40, 70, 95, 255]
-    } else {
-        [70, 95, 115, 230]
-    };
     draw_text(
         frame,
         width,
         &fonts.bold,
-        label,
+        WINDOW_TITLES[index],
         title.x + 86,
         title.y + 8,
         15.0,
-        text_color,
+        if active {
+            [40, 70, 95, 255]
+        } else {
+            [70, 95, 115, 230]
+        },
     );
 }
 
-fn draw_client_body(
-    frame: &mut [u8],
-    width: u32,
-    fonts: &Fonts,
-    index: usize,
-    client: Client,
-    active: bool,
-) {
-    let body = if active {
-        [31, 51, 57, 245]
-    } else {
-        [24, 36, 42, 235]
-    };
-    fill_rect(frame, width, client.content, body);
-
-    let accent = match index {
-        0 => [115, 222, 210, 255],
-        1 => [180, 210, 220, 255],
-        _ => [182, 243, 107, 255],
-    };
-    let font = if index == 0 { &fonts.mono } else { &fonts.regular };
-    let mut y = client.content.y + 14;
-    for line in WINDOW_LINES[index] {
-        if y + 18 > client.content.y + client.content.height {
+fn draw_terminal_body(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect, active: bool) {
+    fill_rect(
+        frame,
+        width,
+        content,
+        if active {
+            [31, 51, 57, 245]
+        } else {
+            [24, 36, 42, 235]
+        },
+    );
+    let lines = [
+        "agentOS shell ready",
+        "xterm PTY connected",
+        "$ ls /workspace",
+        "README.md  config.json  hello.txt",
+        "$ aurora-files /workspace",
+        "opened Aurora Files",
+    ];
+    let mut y = content.y + 14;
+    for line in lines {
+        if y + 18 > content.y + content.height {
             break;
         }
-        draw_text(frame, width, font, line, client.content.x + 16, y, 14.0, accent);
-        y += 22;
+        draw_text(
+            frame,
+            width,
+            &fonts.mono,
+            line,
+            content.x + 16,
+            y,
+            13.0,
+            [115, 222, 210, 255],
+        );
+        y += 20;
+    }
+}
+
+fn draw_log_body(frame: &mut [u8], width: u32, fonts: &Fonts, content: Rect, active: bool) {
+    fill_rect(
+        frame,
+        width,
+        content,
+        if active {
+            [31, 51, 57, 245]
+        } else {
+            [24, 36, 42, 235]
+        },
+    );
+    let lines = [
+        "Aurora WM attached",
+        "SubstructureRedirect",
+        "MapRequest: Aurora Files",
+        "files app running",
+        "source: ecooxai/aurora-wm",
+    ];
+    let mut y = content.y + 14;
+    for line in lines {
+        if y + 18 > content.y + content.height {
+            break;
+        }
+        draw_text(
+            frame,
+            width,
+            &fonts.regular,
+            line,
+            content.x + 16,
+            y,
+            13.0,
+            [180, 210, 220, 255],
+        );
+        y += 20;
     }
 }
 
@@ -508,7 +841,6 @@ fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
         16.0,
         [45, 75, 95, 255],
     );
-
     let pulse = ((tick / 400) % 2) as i32;
     fill_circle(
         frame,
@@ -526,7 +858,7 @@ fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
         frame,
         width,
         &fonts.regular,
-        "DISPLAY :0  ·  RUNNING",
+        "DISPLAY :0  ·  FILES RUNNING",
         width as i32 - 32,
         11,
         13.0,
@@ -534,12 +866,13 @@ fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
     );
 }
 
-fn draw_dock(frame: &mut [u8], width: u32, fonts: &Fonts, dock: Rect) {
+fn draw_dock(frame: &mut [u8], width: u32, fonts: &Fonts, dock: Rect, active: u32) {
     fill_round_rect(frame, width, dock, 16, [250, 254, 255, 200]);
     let cy = dock.y + dock.height / 2;
     for i in 0..DOCK_BUTTONS {
         let ix = dock.x + i * DOCK_STRIDE;
         let iy = cy - DOCK_ICON_SIZE / 2;
+        let focused = (i == 0 && active == 0) || (i == 1 && active == FILES_INDEX as u32);
         let color = match i {
             0 => [76, 197, 178, 235],
             1 => [115, 170, 220, 235],
@@ -559,6 +892,19 @@ fn draw_dock(frame: &mut [u8], width: u32, fonts: &Fonts, dock: Rect) {
             DOCK_ICON_RADIUS,
             color,
         );
+        if focused {
+            fill_rect(
+                frame,
+                width,
+                Rect {
+                    x: ix + 12,
+                    y: iy + DOCK_ICON_SIZE + 2,
+                    width: 20,
+                    height: 3,
+                },
+                [40, 70, 90, 220],
+            );
+        }
         let label = DOCK_LABELS[i as usize];
         let tw = measure_text(&fonts.bold, label, 10.0);
         draw_text(
@@ -586,7 +932,6 @@ fn render(state: &mut State) {
         state.frame.fill(0);
     }
 
-    // Split borrows carefully: fonts and frame are separate fields.
     let fonts = Fonts {
         regular: state.fonts.regular.clone(),
         bold: state.fonts.bold.clone(),
@@ -596,11 +941,18 @@ fn render(state: &mut State) {
     let active = state.active;
     let dock = state.dock;
     let tick = state.tick;
+    let path = state.files_path.clone();
+    let entries = state.files.clone();
+    let selected = state.files_selected;
+    let files_visible = state.files_visible;
     let frame = &mut state.frame;
 
     draw_topbar(frame, width, &fonts, tick);
     for (index, client) in clients.iter().copied().enumerate() {
         if client.mapped == 0 {
+            continue;
+        }
+        if index == FILES_INDEX && files_visible == 0 {
             continue;
         }
         let is_active = index as u32 == active;
@@ -616,9 +968,42 @@ fn render(state: &mut State) {
             [0, 0, 0, 55],
         );
         draw_titlebar(frame, width, &fonts, index, client, is_active);
-        draw_client_body(frame, width, &fonts, index, client, is_active);
+        match index {
+            FILES_INDEX => draw_files_app(
+                frame,
+                width,
+                &fonts,
+                client.content,
+                &path,
+                &entries,
+                selected,
+            ),
+            0 => draw_terminal_body(frame, width, &fonts, client.content, is_active),
+            _ => draw_log_body(frame, width, &fonts, client.content, is_active),
+        }
     }
-    draw_dock(frame, width, &fonts, dock);
+    draw_dock(frame, width, &fonts, dock, active);
+}
+
+fn default_files() -> Vec<FileEntry> {
+    vec![
+        FileEntry {
+            name: "README.md".into(),
+            kind: 2,
+        },
+        FileEntry {
+            name: "hello.txt".into(),
+            kind: 2,
+        },
+        FileEntry {
+            name: "data.txt".into(),
+            kind: 2,
+        },
+        FileEntry {
+            name: "config.json".into(),
+            kind: 3,
+        },
+    ]
 }
 
 #[no_mangle]
@@ -626,9 +1011,14 @@ pub extern "C" fn aurora_init(width: u32, height: u32) -> u32 {
     let state = state();
     state.width = width.clamp(320, 1600);
     state.height = height.clamp(180, 1000);
-    state.active = 0;
+    state.active = FILES_INDEX as u32;
     state.tick = 0;
     state.running = 1;
+    state.files_visible = 1;
+    state.files_selected = 0;
+    if state.files.is_empty() {
+        state.files = default_files();
+    }
     state.wallpaper = decode_wallpaper(state.width, state.height);
     state.frame = state.wallpaper.clone();
     layout_clients(state);
@@ -802,6 +1192,84 @@ pub extern "C" fn aurora_is_running() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn aurora_files_visible() -> u32 {
+    state().files_visible
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_show(show: u32) -> u32 {
+    let state = state();
+    state.files_visible = if show == 0 { 0 } else { 1 };
+    if state.files_visible == 1 {
+        state.active = FILES_INDEX as u32;
+        state.clients[FILES_INDEX].mapped = 1;
+    }
+    state.layout_version = state.layout_version.wrapping_add(1);
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_clear() {
+    let state = state();
+    state.files.clear();
+    state.files_selected = -1;
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_path_buf() -> u32 {
+    state().path_buf.as_mut_ptr() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_path_cap() -> u32 {
+    PATH_CAP as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_set_path(len: u32) -> u32 {
+    let state = state();
+    let n = (len as usize).min(PATH_CAP);
+    state.files_path = String::from_utf8_lossy(&state.path_buf[..n]).to_string();
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_name_buf() -> u32 {
+    state().name_buf.as_mut_ptr() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_name_cap() -> u32 {
+    NAME_CAP as u32
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_add(len: u32, kind: u32) -> u32 {
+    let state = state();
+    if state.files.len() >= MAX_FILES {
+        return 0;
+    }
+    let n = (len as usize).min(NAME_CAP);
+    let name = String::from_utf8_lossy(&state.name_buf[..n]).to_string();
+    if name.is_empty() {
+        return 0;
+    }
+    state.files.push(FileEntry {
+        name,
+        kind: kind.min(3),
+    });
+    if state.files_selected < 0 {
+        state.files_selected = 0;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_files_count() -> u32 {
+    state().files.len() as u32
+}
+
+#[no_mangle]
 pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u32 {
     let state = state();
     if index as usize >= WINDOW_COUNT {
@@ -810,6 +1278,9 @@ pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u3
     let client = place_client(index as usize, state.width as i32, state.height as i32, state.dock);
     state.clients[index as usize] = client;
     state.active = index;
+    if index as usize == FILES_INDEX {
+        state.files_visible = 1;
+    }
     state.layout_version = state.layout_version.wrapping_add(1);
     state.running = 1;
     1
@@ -818,9 +1289,42 @@ pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u3
 #[no_mangle]
 pub extern "C" fn aurora_pointer_down(x: i32, y: i32) -> u32 {
     let state = state();
+    // Dock launchers: Term -> terminal, Files -> Aurora Files (like real WM).
+    let dock = state.dock;
+    if dock.contains(x, y) {
+        let local = x - dock.x;
+        let button = local / DOCK_STRIDE;
+        match button {
+            0 => state.active = 0,
+            1 => {
+                state.files_visible = 1;
+                state.active = FILES_INDEX as u32;
+                state.clients[FILES_INDEX].mapped = 1;
+            }
+            _ => {}
+        }
+        state.layout_version = state.layout_version.wrapping_add(1);
+        return state.active + 1;
+    }
+
     for (index, client) in state.clients.iter().enumerate().rev() {
         if client.mapped == 1 && client.frame.contains(x, y) {
+            if index == FILES_INDEX && state.files_visible == 0 {
+                continue;
+            }
             state.active = index as u32;
+            if index == FILES_INDEX {
+                // Select file row if click is in the list area.
+                let content = client.content;
+                let list_x = content.x + 132;
+                let list_top = content.y + 90;
+                if x >= list_x && y >= list_top {
+                    let row = (y - list_top) / 42;
+                    if row >= 0 && (row as usize) < state.files.len() {
+                        state.files_selected = row;
+                    }
+                }
+            }
             return state.active + 1;
         }
     }

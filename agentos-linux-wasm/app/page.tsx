@@ -1111,7 +1111,11 @@ export default function Home() {
         </div>
       </header>
 
-      <WebDesktop startSignal={desktopStartSignal} onRunning={setDesktopRunning} />
+      <WebDesktop
+        startSignal={desktopStartSignal}
+        onRunning={setDesktopRunning}
+        workspaceFiles={files}
+      />
 
       <section className="lab-grid" aria-label="AgentOS browser lab">
         <aside className="package-panel">

@@ -181,14 +181,21 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   assert.equal(typeof auroraExports.aurora_map_request, "function");
   assert.equal(typeof auroraExports.aurora_render, "function");
   assert.equal(typeof auroraExports.aurora_frame_ptr, "function");
+  assert.equal(typeof auroraExports.aurora_files_show, "function");
+  assert.equal(typeof auroraExports.aurora_files_add, "function");
 
   auroraExports.aurora_init(960, 540);
   assert.equal(auroraExports.aurora_window_count(), 3);
   assert.equal(auroraExports.aurora_is_running(), 1);
+  assert.equal(auroraExports.aurora_files_visible(), 1);
+  assert.equal(auroraExports.aurora_active_window(), 2);
+  assert.ok(auroraExports.aurora_files_count() >= 1);
   assert.equal(auroraExports.aurora_topbar_height(), 40);
   assert.equal(auroraExports.aurora_titlebar_height(), 34);
   auroraExports.aurora_map_request(0, 320, 200);
   assert.ok(auroraExports.aurora_window_width(0) > 0);
+  auroraExports.aurora_files_show(1);
+  assert.equal(auroraExports.aurora_files_visible(), 1);
   auroraExports.aurora_render(1);
   assert.equal(auroraExports.aurora_frame_len(), 960 * 540 * 4);
 

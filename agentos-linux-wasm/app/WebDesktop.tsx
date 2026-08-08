@@ -77,6 +77,16 @@ type AuroraModule = {
   aurora_wallpaper_len: WasmCall;
   aurora_topbar_height: WasmCall;
   aurora_titlebar_height: WasmCall;
+  aurora_files_show: WasmCall;
+  aurora_files_clear: WasmCall;
+  aurora_files_path_buf: WasmCall;
+  aurora_files_path_cap: WasmCall;
+  aurora_files_set_path: WasmCall;
+  aurora_files_name_buf: WasmCall;
+  aurora_files_name_cap: WasmCall;
+  aurora_files_add: WasmCall;
+  aurora_files_count: WasmCall;
+  aurora_files_visible: WasmCall;
 };
 
 type XserverModule = {
@@ -129,7 +139,65 @@ type X11Runtime = {
 type WebDesktopProps = {
   startSignal: number;
   onRunning: (running: boolean) => void;
+  workspaceFiles?: Record<string, string>;
 };
+
+function listWorkspaceEntries(files: Record<string, string>, dir = "/workspace"): Array<{ name: string; kind: number }> {
+  const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+  const names = new Set<string>();
+  for (const path of Object.keys(files)) {
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (!rest || rest.includes("/")) continue;
+    names.add(rest);
+  }
+  // Always expose common workspace dirs as places-style folders.
+  for (const dirName of ["src", "public", "scripts"]) {
+    if (Object.keys(files).some((path) => path.startsWith(`${prefix}${dirName}/`))) {
+      names.add(dirName);
+    }
+  }
+  return [...names]
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => {
+      const lower = name.toLowerCase();
+      const isDir = !files[`${prefix}${name}`] && Object.keys(files).some((path) => path.startsWith(`${prefix}${name}/`));
+      let kind = 1;
+      if (isDir) kind = 0;
+      else if (lower.endsWith(".json") || lower.endsWith(".toml") || lower.endsWith(".yml")) kind = 3;
+      else if (lower.endsWith(".md") || lower.endsWith(".txt") || lower.endsWith(".rs") || lower.endsWith(".ts") || lower.endsWith(".tsx")) kind = 2;
+      return { name, kind };
+    });
+}
+
+function writeWasmString(memory: WebAssembly.Memory, ptr: number, cap: number, value: string): number {
+  const bytes = new TextEncoder().encode(value);
+  const length = Math.min(bytes.length, Math.max(0, cap - 1));
+  new Uint8Array(memory.buffer, ptr, length).set(bytes.subarray(0, length));
+  return length;
+}
+
+function syncAuroraFiles(aurora: AuroraModule, workspaceFiles: Record<string, string>, path = "/workspace"): void {
+  aurora.aurora_files_clear();
+  const pathLen = writeWasmString(
+    aurora.memory,
+    aurora.aurora_files_path_buf(),
+    aurora.aurora_files_path_cap(),
+    path,
+  );
+  aurora.aurora_files_set_path(pathLen);
+  for (const entry of listWorkspaceEntries(workspaceFiles, path)) {
+    const nameLen = writeWasmString(
+      aurora.memory,
+      aurora.aurora_files_name_buf(),
+      aurora.aurora_files_name_cap(),
+      entry.name,
+    );
+    aurora.aurora_files_add(nameLen, entry.kind);
+  }
+  // Ensure the Files app is mapped/focused like upstream show_folder(..., true).
+  aurora.aurora_files_show(1);
+}
 
 const x11Api = x11 as unknown as X11Api;
 
@@ -201,17 +269,27 @@ async function loadAuroraWm(): Promise<{ layout: WindowSpec[]; aurora: AuroraMod
     aurora_wallpaper_len: requiredExport(exports, "aurora_wallpaper_len"),
     aurora_topbar_height: requiredExport(exports, "aurora_topbar_height"),
     aurora_titlebar_height: requiredExport(exports, "aurora_titlebar_height"),
+    aurora_files_show: requiredExport(exports, "aurora_files_show"),
+    aurora_files_clear: requiredExport(exports, "aurora_files_clear"),
+    aurora_files_path_buf: requiredExport(exports, "aurora_files_path_buf"),
+    aurora_files_path_cap: requiredExport(exports, "aurora_files_path_cap"),
+    aurora_files_set_path: requiredExport(exports, "aurora_files_set_path"),
+    aurora_files_name_buf: requiredExport(exports, "aurora_files_name_buf"),
+    aurora_files_name_cap: requiredExport(exports, "aurora_files_name_cap"),
+    aurora_files_add: requiredExport(exports, "aurora_files_add"),
+    aurora_files_count: requiredExport(exports, "aurora_files_count"),
+    aurora_files_visible: requiredExport(exports, "aurora_files_visible"),
   };
 
   requiredExport(exports, "aurora_init")(DISPLAY_WIDTH, DISPLAY_HEIGHT);
   if (aurora.aurora_is_running() !== 1) throw new Error("Aurora WM failed to enter running state");
 
   const count = requiredExport(exports, "aurora_window_count")();
-  const names = ["terminal", "agent log", "files"];
+  const names = ["terminal", "agent log", "Aurora Files"];
   const palettes = [
     { background: 0x172f35, accent: 0x73ded2, lines: ["agentOS shell", "xterm PTY connected", "ready for input", "processes: 3"] },
-    { background: 0x18262f, accent: 0x8ebac4, lines: ["Aurora WM", "X11 MapRequest", "SubstructureRedirect", "ecooxai/aurora-wm"] },
-    { background: 0x1d292b, accent: 0xb6f36b, lines: ["/workspace", "README.md", "config.json", "hello.txt"] },
+    { background: 0x18262f, accent: 0x8ebac4, lines: ["Aurora WM", "MapRequest: Aurora Files", "files app running", "ecooxai/aurora-wm"] },
+    { background: 0xf7fcff, accent: 0x4cc5b2, lines: ["/workspace", "Aurora Files", "Places · Workspace", "auto-started with WM"] },
   ];
 
   return {
@@ -491,10 +569,18 @@ async function startX11Runtime(
   webGpuCanvas: HTMLCanvasElement,
   onStatus: (status: string) => void,
   onWindows: (windows: WindowSpec[]) => void,
+  workspaceFiles: Record<string, string>,
 ): Promise<X11Runtime> {
   onStatus("loading Aurora WM WASM (ecooxai/aurora-wm)…");
   const { layout, aurora } = await loadAuroraWm();
-  onWindows(layout);
+  // Match upstream WM boot: show_folder / aurora-files is launched with the session.
+  syncAuroraFiles(aurora, workspaceFiles, "/workspace");
+  if (aurora.aurora_files_visible() !== 1 || aurora.aurora_files_count() < 1) {
+    throw new Error("Aurora Files failed to start with the WM session");
+  }
+  aurora.aurora_render(0);
+  onWindows(readLayout(aurora, layout));
+  onStatus(`Aurora Files running · ${aurora.aurora_files_count()} items in /workspace`);
 
   onStatus("loading Xserver WASM compositor…");
   const xserver = await loadXserver();
@@ -632,9 +718,9 @@ async function startX11Runtime(
   const auroraRunning = aurora.aurora_is_running() === 1;
   onStatus(
     auroraRunning && xserverRunning
-      ? "running · Xserver WASM + Aurora WM WASM · X11 DISPLAY=:0"
+      ? "running · Xserver + Aurora WM + Aurora Files · DISPLAY=:0"
       : auroraRunning
-        ? "running · Aurora WM WASM + JS X11 protocol server · DISPLAY=:0"
+        ? "running · Aurora WM + Aurora Files · DISPLAY=:0"
         : "failed · desktop modules did not start",
   );
 
@@ -691,11 +777,12 @@ async function startX11Runtime(
   };
 }
 
-export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
+export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebDesktopProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const webGpuCanvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<X11Runtime | null>(null);
   const onRunningRef = useRef(onRunning);
+  const workspaceFilesRef = useRef(workspaceFiles);
   const [status, setStatus] = useState("idle · press start above");
   const [backend, setBackend] = useState("not started");
   const [windows, setWindows] = useState<WindowSpec[]>([]);
@@ -706,18 +793,28 @@ export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
   }, [onRunning]);
 
   useEffect(() => {
+    workspaceFilesRef.current = workspaceFiles;
+  }, [workspaceFiles]);
+
+  useEffect(() => {
     if (startSignal === 0) return;
     let cancelled = false;
     const start = async () => {
       runtimeRef.current?.stop();
       runtimeRef.current = null;
       onRunningRef.current(false);
-      setStatus("compiling path · loading WASM Xserver + Aurora WM…");
+      setStatus("starting Aurora WM + Aurora Files…");
       setBackend("initializing");
       const canvas = canvasRef.current;
       const webGpuCanvas = webGpuCanvasRef.current;
       if (!canvas || !webGpuCanvas) throw new Error("display canvases are not mounted");
-      const runtime = await startX11Runtime(canvas, webGpuCanvas, setStatus, setWindows);
+      const runtime = await startX11Runtime(
+        canvas,
+        webGpuCanvas,
+        setStatus,
+        setWindows,
+        workspaceFilesRef.current,
+      );
       if (cancelled) {
         runtime.stop();
         return;
@@ -796,13 +893,14 @@ export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
         <span className={"desktop-status " + (status.startsWith("running") ? "running" : "")}>{status}</span>
       </div>
       <p className="web-desktop-intro">
-        Aurora WM is a WASM build of{" "}
+        Aurora WM auto-starts <strong>Aurora Files</strong> on session boot (same idea as upstream
+        <code> show_folder </code>/<code> aurora-files </code>
+        ). The Files window lists the live <code>/workspace</code> browser filesystem with Places,
+        toolbar, and selectable rows. Built from{" "}
         <a href="https://github.com/ecooxai/aurora-wm" target="_blank" rel="noreferrer">
           ecooxai/aurora-wm
         </a>
-        {" "}using the same Noto fonts + rusttype text path as the Linux WM (titles, topbar, dock, client
-        text). The browser cannot host Unix-socket Xorg clients unchanged, so the X11 wire protocol runs
-        in-tab via the JS X11 server while Aurora WASM owns real WM chrome and MapRequest placement.
+        .
       </p>
       <div className="web-display-shell">
         <canvas
@@ -831,8 +929,8 @@ export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
       </div>
       <div className="web-desktop-footer">
         <span><i className="footer-dot" /> {backend}</span>
-        <span>{windows.length} managed X11 clients · Aurora frames</span>
-        <span>MapRequest · SubstructureRedirect</span>
+        <span>{windows.length} managed X11 clients · Aurora Files auto-start</span>
+        <span>MapRequest · show_folder on boot</span>
       </div>
     </section>
   );
