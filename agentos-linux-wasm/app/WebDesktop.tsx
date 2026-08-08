@@ -1,9 +1,11 @@
 "use client";
 
 import "./buffer-polyfill";
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import x11 from "x11";
 import { XServer, createStreamPair } from "x11/lib/xserver/index.js";
+import { startAuroraHtop, type AuroraHtopSession } from "./auroraHtop";
+import { openDuckDuckGoHome, searchDuckDuckGo } from "./netsurfBrowse";
 
 const DISPLAY_WIDTH = 960;
 const DISPLAY_HEIGHT = 540;
@@ -58,8 +60,13 @@ type AuroraModule = {
   aurora_tick: WasmCall;
   aurora_render: WasmCall;
   aurora_pointer_down: WasmCall;
+  aurora_pointer_move: WasmCall;
+  aurora_pointer_up: WasmCall;
+  aurora_is_dragging: WasmCall;
+  aurora_drag_index: WasmCall;
   aurora_handle_key: WasmCall;
   aurora_map_request: WasmCall;
+  aurora_layout_version: WasmCall;
   aurora_window_x: WasmCall;
   aurora_window_y: WasmCall;
   aurora_window_width: WasmCall;
@@ -116,6 +123,23 @@ type NetsurfModule = {
   netsurf_line_buf: WasmCall;
   netsurf_line_cap: WasmCall;
   netsurf_add_line: WasmCall;
+  netsurf_set_mode: WasmCall;
+  netsurf_mode: WasmCall;
+  netsurf_query_buf: WasmCall;
+  netsurf_query_cap: WasmCall;
+  netsurf_set_query: WasmCall;
+  netsurf_query_len: WasmCall;
+  netsurf_clear_results: WasmCall;
+  netsurf_add_result: WasmCall;
+  netsurf_result_count: WasmCall;
+  netsurf_search_x: WasmCall;
+  netsurf_search_y: WasmCall;
+  netsurf_search_w: WasmCall;
+  netsurf_search_h: WasmCall;
+  netsurf_pointer_down: WasmCall;
+  netsurf_key: WasmCall;
+  netsurf_set_status: WasmCall;
+  netsurf_focus_search: WasmCall;
 };
 
 type XserverModule = {
@@ -163,6 +187,10 @@ type X11Runtime = {
   netsurf: NetsurfModule | null;
   presenter: Presenter;
   animationFrame: number;
+  htop: AuroraHtopSession | null;
+  syncManagedGeometry: () => void;
+  markDirty: () => void;
+  submitNetsurfSearch: () => Promise<void>;
   stop: () => void;
 };
 
@@ -268,53 +296,29 @@ async function loadNetsurf(contentWidth: number, contentHeight: number): Promise
       netsurf_line_buf: requiredExport(exports, "netsurf_line_buf"),
       netsurf_line_cap: requiredExport(exports, "netsurf_line_cap"),
       netsurf_add_line: requiredExport(exports, "netsurf_add_line"),
+      netsurf_set_mode: optionalExport(exports, "netsurf_set_mode"),
+      netsurf_mode: optionalExport(exports, "netsurf_mode"),
+      netsurf_query_buf: optionalExport(exports, "netsurf_query_buf", requiredExport(exports, "netsurf_address_buf")),
+      netsurf_query_cap: optionalExport(exports, "netsurf_query_cap", () => 160),
+      netsurf_set_query: optionalExport(exports, "netsurf_set_query"),
+      netsurf_query_len: optionalExport(exports, "netsurf_query_len"),
+      netsurf_clear_results: optionalExport(exports, "netsurf_clear_results"),
+      netsurf_add_result: optionalExport(exports, "netsurf_add_result"),
+      netsurf_result_count: optionalExport(exports, "netsurf_result_count"),
+      netsurf_search_x: optionalExport(exports, "netsurf_search_x"),
+      netsurf_search_y: optionalExport(exports, "netsurf_search_y"),
+      netsurf_search_w: optionalExport(exports, "netsurf_search_w"),
+      netsurf_search_h: optionalExport(exports, "netsurf_search_h"),
+      netsurf_pointer_down: optionalExport(exports, "netsurf_pointer_down"),
+      netsurf_key: optionalExport(exports, "netsurf_key"),
+      netsurf_set_status: optionalExport(exports, "netsurf_set_status"),
+      netsurf_focus_search: optionalExport(exports, "netsurf_focus_search"),
     };
     netsurf.netsurf_init(Math.max(320, contentWidth), Math.max(200, contentHeight));
     return netsurf;
   } catch {
     return null;
   }
-}
-
-function netsurfSetText(netsurf: NetsurfModule, commit: "address" | "title" | "line", value: string): void {
-  const ptr = commit === "line" ? netsurf.netsurf_line_buf() : netsurf.netsurf_address_buf();
-  const cap = commit === "line" ? netsurf.netsurf_line_cap() : netsurf.netsurf_address_cap();
-  const len = writeWasmString(netsurf.memory, ptr, cap, value);
-  if (commit === "address") netsurf.netsurf_commit_address(len);
-  else if (commit === "title") netsurf.netsurf_commit_title(len);
-  else netsurf.netsurf_add_line(len);
-}
-
-async function launchNetsurfPage(netsurf: NetsurfModule, url: string): Promise<void> {
-  netsurfSetText(netsurf, "address", url);
-  netsurfSetText(netsurf, "title", "NetSurf");
-  netsurf.netsurf_clear_lines();
-  const fallback = [
-    "NetSurf",
-    "Small as a mouse, fast as a cheetah, and available for free.",
-    "",
-    `Opened ${url}`,
-    "Compiled with Emscripten for the AgentOS in-tab Xserver.",
-    "Upstream: https://github.com/netsurf-browser/netsurf",
-  ];
-  try {
-    const response = await fetch(url, { mode: "cors" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const html = await response.text();
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    if (titleMatch?.[1]) netsurfSetText(netsurf, "title", titleMatch[1].trim().slice(0, 80));
-    const text = html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    const chunks = text.match(/.{1,90}/g)?.slice(0, 18) ?? fallback;
-    for (const line of chunks) netsurfSetText(netsurf, "line", line);
-  } catch {
-    for (const line of fallback) netsurfSetText(netsurf, "line", line);
-  }
-  netsurf.netsurf_render(0);
 }
 
 function blitNetsurfIntoAurora(aurora: AuroraModule, netsurf: NetsurfModule): void {
@@ -375,6 +379,11 @@ function requiredExport(exports: Record<string, unknown>, name: string): WasmCal
   return fn;
 }
 
+function optionalExport(exports: Record<string, unknown>, name: string, fallback: WasmCall = () => 0): WasmCall {
+  const fn = exports[name] as WasmCall | undefined;
+  return typeof fn === "function" ? fn : fallback;
+}
+
 async function loadAuroraWm(): Promise<{ layout: WindowSpec[]; aurora: AuroraModule }> {
   const response = await fetch("/wasm/aurora-wm-web.wasm");
   if (!response.ok) throw new Error(`Aurora WM WASM returned HTTP ${response.status}`);
@@ -389,8 +398,13 @@ async function loadAuroraWm(): Promise<{ layout: WindowSpec[]; aurora: AuroraMod
     aurora_tick: requiredExport(exports, "aurora_tick"),
     aurora_render: requiredExport(exports, "aurora_render"),
     aurora_pointer_down: requiredExport(exports, "aurora_pointer_down"),
+    aurora_pointer_move: requiredExport(exports, "aurora_pointer_move"),
+    aurora_pointer_up: requiredExport(exports, "aurora_pointer_up"),
+    aurora_is_dragging: requiredExport(exports, "aurora_is_dragging"),
+    aurora_drag_index: requiredExport(exports, "aurora_drag_index"),
     aurora_handle_key: requiredExport(exports, "aurora_handle_key"),
     aurora_map_request: requiredExport(exports, "aurora_map_request"),
+    aurora_layout_version: requiredExport(exports, "aurora_layout_version"),
     aurora_window_x: requiredExport(exports, "aurora_window_x"),
     aurora_window_y: requiredExport(exports, "aurora_window_y"),
     aurora_window_width: requiredExport(exports, "aurora_window_width"),
@@ -728,12 +742,8 @@ async function startX11Runtime(
   syncAuroraTerminal(aurora, [
     "Aurora Terminal",
     "compiled from ecooxai/aurora-wm terminal UI",
-    "session bridge: agentOS browser shell",
-    "$ ls /workspace",
-    ...listWorkspaceEntries(workspaceFiles).map((entry) => entry.name).slice(0, 6),
-    "$ netsurf https://www.netsurf-browser.org/",
-    "launched NetSurf WASM client",
-    "$",
+    "booting real htop.wasm (upstream ncurses)…",
+    "$ htop",
   ]);
   aurora.aurora_netsurf_show(1);
   aurora.aurora_term_show(1);
@@ -744,15 +754,21 @@ async function startX11Runtime(
   aurora.aurora_render(0);
   onWindows(readLayout(aurora, layout));
 
-  onStatus("loading NetSurf WASM (netsurf-browser/netsurf)…");
+  onStatus("loading NetSurf WASM · opening DuckDuckGo…");
   const netsurfIndex = aurora.aurora_netsurf_index();
   const netsurf = await loadNetsurf(
     aurora.aurora_content_width(netsurfIndex),
     aurora.aurora_content_height(netsurfIndex),
   );
   if (netsurf) {
-    await launchNetsurfPage(netsurf, "https://www.netsurf-browser.org/");
+    await openDuckDuckGoHome(netsurf);
     aurora.aurora_netsurf_show(1);
+    // Focus NetSurf content so keyboard goes to DuckDuckGo search immediately.
+    const focusX = aurora.aurora_content_x(netsurfIndex) + Math.floor(aurora.aurora_content_width(netsurfIndex) / 2);
+    const focusY = aurora.aurora_content_y(netsurfIndex) + Math.floor(aurora.aurora_content_height(netsurfIndex) / 2);
+    aurora.aurora_pointer_down(focusX, focusY);
+    aurora.aurora_pointer_up();
+    netsurf.netsurf_focus_search(1);
   }
 
   onStatus("loading Xserver WASM compositor…");
@@ -787,14 +803,53 @@ async function startX11Runtime(
   const managed = new Map<number, { index: number; spec: WindowSpec; gc: number }>();
   let stopped = false;
   let currentLayout = layout;
-  const paintState = { lastPaint: -1, lastActive: aurora.aurora_active_window(), dirty: true };
+  let htopSession: AuroraHtopSession | null = null;
+  const paintState = {
+    lastPaint: -1,
+    lastActive: aurora.aurora_active_window(),
+    lastLayout: aurora.aurora_layout_version(),
+    dirty: true,
+  };
   const markDirty = () => {
     paintState.dirty = true;
+  };
+
+  const syncManagedGeometry = () => {
+    for (const [wid, entry] of managed) {
+      const content = {
+        x: aurora.aurora_content_x(entry.index),
+        y: aurora.aurora_content_y(entry.index),
+        width: aurora.aurora_content_width(entry.index),
+        height: aurora.aurora_content_height(entry.index),
+      };
+      const frame = {
+        x: aurora.aurora_window_x(entry.index),
+        y: aurora.aurora_window_y(entry.index),
+        width: aurora.aurora_window_width(entry.index),
+        height: aurora.aurora_window_height(entry.index),
+      };
+      callX(wm, "ConfigureWindow", wid, {
+        x: content.x,
+        y: content.y,
+        width: content.width,
+        height: content.height,
+        borderWidth: 0,
+      });
+      entry.spec = {
+        ...entry.spec,
+        ...frame,
+        contentX: content.x,
+        contentY: content.y,
+        contentWidth: content.width,
+        contentHeight: content.height,
+      };
+    }
   };
 
   const refreshWindows = () => {
     currentLayout = readLayout(aurora, layout);
     onWindows(currentLayout);
+    syncManagedGeometry();
     if (xserver) syncWindowsToXserver(aurora, xserver, currentLayout.length);
     markDirty();
   };
@@ -890,23 +945,77 @@ async function startX11Runtime(
   const xserverRunning = xserver?.xserver_is_running() === 1;
   const auroraRunning = aurora.aurora_is_running() === 1;
   const netsurfRunning = netsurf?.netsurf_is_running() === 1;
+
+  // Real Linux htop compiled to WASM — runs inside Aurora Terminal on session boot.
+  const termIndex = aurora.aurora_term_index();
+  const termCols = Math.max(40, Math.floor(aurora.aurora_content_width(termIndex) / 7) - 2);
+  const termRows = Math.max(8, Math.floor((aurora.aurora_content_height(termIndex) - 34) / 16));
+  htopSession = startAuroraHtop(aurora, {
+    cols: termCols,
+    rows: termRows,
+    onUpdate: () => {
+      markDirty();
+    },
+    onStatus: (text) => {
+      if (!stopped) onStatus(`${text} · drag titlebars · DISPLAY=:0`);
+    },
+  });
+  // Focus the terminal content (not titlebar) so htop is visible without starting a drag.
+  aurora.aurora_pointer_down(
+    aurora.aurora_content_x(termIndex) + 8,
+    aurora.aurora_content_y(termIndex) + 8,
+  );
+  aurora.aurora_pointer_up();
+
+  const submitNetsurfSearch = async () => {
+    if (!netsurf) return;
+    const queryLen = netsurf.netsurf_query_len();
+    const ptr = netsurf.netsurf_query_buf();
+    const bytes = new Uint8Array(netsurf.memory.buffer, ptr, Math.max(0, queryLen));
+    const query = new TextDecoder().decode(bytes);
+    try {
+      await searchDuckDuckGo(netsurf, query);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "search failed";
+      const status = `DuckDuckGo search failed · ${message}`;
+      const len = writeWasmString(
+        netsurf.memory,
+        netsurf.netsurf_address_buf(),
+        netsurf.netsurf_address_cap(),
+        status,
+      );
+      netsurf.netsurf_set_status(len);
+    }
+    markDirty();
+  };
+
   onStatus(
     auroraRunning && netsurfRunning
-      ? `running · Terminal + NetSurf + Files · ${xserverRunning ? "Xserver WASM" : "JS X11"} · DISPLAY=:0`
+      ? `running · click/drag/type enabled · DuckDuckGo + htop · ${xserverRunning ? "Xserver WASM" : "JS X11"} · DISPLAY=:0`
       : auroraRunning
-        ? "running · Aurora Terminal + Files · DISPLAY=:0"
+        ? "running · click/drag/type enabled · htop · DISPLAY=:0"
         : "failed · desktop modules did not start",
   );
 
   // Font glyph rasterization is expensive; redraw Aurora chrome on state changes /
-  // ~2.5 Hz for the topbar pulse, not every animation frame.
+  // ~2.5 Hz for the topbar pulse, not every animation frame. Dragging always paints.
   const paintAurora = (now: number, force = false) => {
     const active = aurora.aurora_active_window();
-    if (!force && !paintState.dirty && active === paintState.lastActive && now - paintState.lastPaint < 400) {
+    const layoutVersion = aurora.aurora_layout_version();
+    const dragging = aurora.aurora_is_dragging() === 1;
+    if (
+      !force &&
+      !paintState.dirty &&
+      !dragging &&
+      active === paintState.lastActive &&
+      layoutVersion === paintState.lastLayout &&
+      now - paintState.lastPaint < 400
+    ) {
       return;
     }
     paintState.dirty = false;
     paintState.lastActive = active;
+    paintState.lastLayout = layoutVersion;
     paintState.lastPaint = now;
     aurora.aurora_tick(now);
     aurora.aurora_render(now);
@@ -945,8 +1054,14 @@ async function startX11Runtime(
     netsurf,
     presenter,
     animationFrame,
+    htop: htopSession,
+    syncManagedGeometry,
+    markDirty,
+    submitNetsurfSearch,
     stop: () => {
       stopped = true;
+      htopSession?.stop();
+      htopSession = null;
       cancelAnimationFrame(animationFrame);
       presenter.dispose?.();
       wm.terminate();
@@ -955,9 +1070,40 @@ async function startX11Runtime(
   };
 }
 
+function keysymFromDomKey(event: KeyboardEvent): number | null {
+  if (event.key.length === 1) return event.key.charCodeAt(0);
+  switch (event.key) {
+    case "Backspace":
+      return 0xff08;
+    case "Tab":
+      return 0xff09;
+    case "Enter":
+      return 0xff0d;
+    case "Escape":
+      return 0xff1b;
+    case "ArrowLeft":
+      return 0xff51;
+    case "ArrowUp":
+      return 0xff52;
+    case "ArrowRight":
+      return 0xff53;
+    case "ArrowDown":
+      return 0xff54;
+    case "Delete":
+      return 0xffff;
+    case "Home":
+      return 0xff50;
+    case "End":
+      return 0xff57;
+    default:
+      return null;
+  }
+}
+
 export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebDesktopProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const webGpuCanvasRef = useRef<HTMLCanvasElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<X11Runtime | null>(null);
   const onRunningRef = useRef(onRunning);
   const workspaceFilesRef = useRef(workspaceFiles);
@@ -965,6 +1111,9 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
   const [backend, setBackend] = useState("not started");
   const [windows, setWindows] = useState<WindowSpec[]>([]);
   const [pointer, setPointer] = useState({ x: DISPLAY_WIDTH / 2, y: DISPLAY_HEIGHT / 2 });
+  const pointerRef = useRef({ x: DISPLAY_WIDTH / 2, y: DISPLAY_HEIGHT / 2 });
+  const netsurfTypingRef = useRef(false);
+  const [inputHint, setInputHint] = useState("click the display to focus keyboard + mouse");
 
   useEffect(() => {
     onRunningRef.current = onRunning;
@@ -981,7 +1130,7 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
       runtimeRef.current?.stop();
       runtimeRef.current = null;
       onRunningRef.current(false);
-      setStatus("starting Aurora Terminal + NetSurf + Files…");
+      setStatus("starting Aurora Terminal + DuckDuckGo + Files…");
       setBackend("initializing");
       const canvas = canvasRef.current;
       const webGpuCanvas = webGpuCanvasRef.current;
@@ -999,13 +1148,15 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
       }
       runtimeRef.current = runtime;
       const xserverLabel = runtime.xserver ? "Xserver WASM" : "JS X11";
-      const netsurfLabel = runtime.netsurf ? "NetSurf WASM" : "NetSurf unavailable";
+      const netsurfLabel = runtime.netsurf ? "NetSurf · DuckDuckGo" : "NetSurf unavailable";
       setBackend(
         runtime.presenter.kind === "webgpu"
           ? `WebGPU · ${xserverLabel} · ${netsurfLabel}`
           : `Canvas2D · ${xserverLabel} · ${netsurfLabel}`,
       );
       onRunningRef.current(true);
+      shellRef.current?.focus({ preventScroll: true });
+      setInputHint("focused · drag titlebars · type in DuckDuckGo search");
     };
     void start().catch((error: unknown) => {
       if (cancelled) return;
@@ -1021,44 +1172,191 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
     };
   }, [startSignal]);
 
-  const pointerPosition = (event: PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    const runtime = runtimeRef.current;
-    if (!canvas || !runtime) return null;
-    const bounds = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.min(DISPLAY_WIDTH - 1, Math.round((event.clientX - bounds.left) * DISPLAY_WIDTH / bounds.width)));
-    const y = Math.max(0, Math.min(DISPLAY_HEIGHT - 1, Math.round((event.clientY - bounds.top) * DISPLAY_HEIGHT / bounds.height)));
-    setPointer({ x, y });
-    runtime.server.injectPointerMove(x, y);
-    runtime.xserver?.xserver_input_pointer(x, y, event.buttons);
-    return { runtime, x, y };
-  };
+  // Native listeners on the shell so WebGPU overlay never eats click/drag/type.
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
 
-  const handlePointer = (event: PointerEvent<HTMLCanvasElement>, pressed: boolean) => {
-    const position = pointerPosition(event);
-    if (!position) return;
-    const { runtime } = position;
-    if (pressed) {
-      runtime.aurora.aurora_pointer_down(position.x, position.y);
-      runtime.aurora.aurora_render(Math.round(performance.now()) >>> 0);
+    const mapCoords = (event: PointerEvent) => {
+      const bounds = shell.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return null;
+      const x = Math.max(
+        0,
+        Math.min(DISPLAY_WIDTH - 1, Math.round(((event.clientX - bounds.left) * DISPLAY_WIDTH) / bounds.width)),
+      );
+      const y = Math.max(
+        0,
+        Math.min(DISPLAY_HEIGHT - 1, Math.round(((event.clientY - bounds.top) * DISPLAY_HEIGHT) / bounds.height)),
+      );
+      return { x, y };
+    };
+
+    const netsurfContentAt = (runtime: X11Runtime, x: number, y: number) => {
+      const index = runtime.aurora.aurora_netsurf_index();
+      const cx = runtime.aurora.aurora_content_x(index);
+      const cy = runtime.aurora.aurora_content_y(index);
+      const cw = runtime.aurora.aurora_content_width(index);
+      const ch = runtime.aurora.aurora_content_height(index);
+      if (x < cx || y < cy || x >= cx + cw || y >= cy + ch) return null;
+      return { index, cx, cy, cw, ch };
+    };
+
+    const routeNetsurfPointer = (runtime: X11Runtime, x: number, y: number) => {
+      const netsurf = runtime.netsurf;
+      const content = netsurfContentAt(runtime, x, y);
+      if (!netsurf || !content) return 0;
+      const localX = Math.floor(((x - content.cx) * netsurf.netsurf_width()) / Math.max(1, content.cw));
+      const localY = Math.floor(((y - content.cy) * netsurf.netsurf_height()) / Math.max(1, content.ch));
+      return netsurf.netsurf_pointer_down(localX, localY);
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      const runtime = runtimeRef.current;
+      const coords = mapCoords(event);
+      if (!runtime || !coords) return;
+      event.preventDefault();
+      shell.focus({ preventScroll: true });
+      try {
+        shell.setPointerCapture(event.pointerId);
+      } catch {
+        // ignore capture failures
+      }
+      pointerRef.current = coords;
+      setPointer(coords);
+      runtime.server.injectPointerMove(coords.x, coords.y);
+      runtime.xserver?.xserver_input_pointer(coords.x, coords.y, event.buttons || 1);
+      runtime.aurora.aurora_pointer_down(coords.x, coords.y);
+      const inNetsurfContent = !!netsurfContentAt(runtime, coords.x, coords.y);
+      const hit = routeNetsurfPointer(runtime, coords.x, coords.y);
+      // Any click inside NetSurf page content arms keyboard → DuckDuckGo search box.
+      netsurfTypingRef.current = inNetsurfContent || hit === 1 || hit === 2;
+      if (netsurfTypingRef.current) {
+        runtime.netsurf?.netsurf_focus_search(1);
+        setInputHint("NetSurf typing armed · type query, Enter to search DuckDuckGo");
+      } else {
+        setInputHint("pointer down · drag titlebar to move");
+      }
+      if (hit === 2) void runtime.submitNetsurfSearch();
       runtime.server.injectButton(event.button + 1, true);
-    } else {
-      runtime.server.injectButton(event.button + 1, false);
-    }
-  };
+      runtime.markDirty();
+      runtime.aurora.aurora_render(Math.round(performance.now()) >>> 0);
+    };
 
-  const handleKey = (event: KeyboardEvent<HTMLCanvasElement>, isPress: boolean) => {
-    const runtime = runtimeRef.current;
-    if (!runtime) return;
-    const key = event.key.length === 1 ? event.key : event.key === "Tab" ? "\t" : "";
-    if (!key) return;
-    const keysym = key === "\t" ? 0x09 : key.charCodeAt(0);
-    if (isPress) runtime.aurora.aurora_handle_key(keysym);
-    const keycode = runtime.server.keymap.keycodeForKeysym(keysym);
-    if (!keycode) return;
-    event.preventDefault();
-    runtime.server.injectKey(keycode, isPress);
-  };
+    const onPointerMove = (event: PointerEvent) => {
+      const runtime = runtimeRef.current;
+      const coords = mapCoords(event);
+      if (!runtime || !coords) return;
+      pointerRef.current = coords;
+      setPointer(coords);
+      runtime.server.injectPointerMove(coords.x, coords.y);
+      runtime.xserver?.xserver_input_pointer(coords.x, coords.y, event.buttons);
+      if ((event.buttons & 1) === 0 && runtime.aurora.aurora_is_dragging() !== 1) return;
+      event.preventDefault();
+      const moved = runtime.aurora.aurora_pointer_move(coords.x, coords.y);
+      if (moved === 1 || runtime.aurora.aurora_is_dragging() === 1) {
+        runtime.syncManagedGeometry();
+        runtime.markDirty();
+        runtime.aurora.aurora_render(Math.round(performance.now()) >>> 0);
+        setInputHint(`dragging window ${runtime.aurora.aurora_drag_index()} · ${coords.x},${coords.y}`);
+      }
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      const runtime = runtimeRef.current;
+      const coords = mapCoords(event);
+      if (!runtime) return;
+      if (coords) {
+        pointerRef.current = coords;
+        setPointer(coords);
+        runtime.server.injectPointerMove(coords.x, coords.y);
+        runtime.xserver?.xserver_input_pointer(coords.x, coords.y, 0);
+      }
+      runtime.aurora.aurora_pointer_up();
+      runtime.syncManagedGeometry();
+      runtime.server.injectButton(event.button + 1, false);
+      runtime.markDirty();
+      try {
+        shell.releasePointerCapture(event.pointerId);
+      } catch {
+        // ignore
+      }
+      setInputHint("focused · drag titlebars · type in DuckDuckGo");
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const runtime = runtimeRef.current;
+      if (!runtime) return;
+      const keysym = keysymFromDomKey(event);
+      if (keysym === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      runtime.aurora.aurora_handle_key(keysym <= 0xff ? keysym : keysym & 0xff);
+      const netsurf = runtime.netsurf;
+      const netsurfIndex = runtime.aurora.aurora_netsurf_index();
+      const netsurfActive =
+        netsurfTypingRef.current || runtime.aurora.aurora_active_window() === netsurfIndex;
+      if (netsurf && netsurfActive) {
+        netsurfTypingRef.current = true;
+        netsurf.netsurf_focus_search(1);
+        let code = 0;
+        if (event.key === "Backspace") code = 8;
+        else if (event.key === "Enter") code = 13;
+        else if (event.key.length === 1) code = event.key.charCodeAt(0);
+        if (code) {
+          const result = netsurf.netsurf_key(code);
+          const now = Math.round(performance.now()) >>> 0;
+          netsurf.netsurf_render(now);
+          runtime.markDirty();
+          runtime.aurora.aurora_render(now);
+          const qLen = netsurf.netsurf_query_len();
+          setInputHint(`NetSurf query (${qLen} chars) · key ${event.key}`);
+          if (result === 2) void runtime.submitNetsurfSearch();
+        }
+      } else {
+        setInputHint(`key ${event.key} → X11 · click DuckDuckGo to type`);
+      }
+
+      const keycode = runtime.server.keymap.keycodeForKeysym(keysym)
+        || (event.key.length === 1 ? runtime.server.keymap.keycodeForKeysym(event.key.charCodeAt(0)) : 0);
+      if (keycode) runtime.server.injectKey(keycode, true);
+      const pos = pointerRef.current;
+      runtime.xserver?.xserver_input_pointer(pos.x, pos.y, 0);
+      const xserver = runtime.xserver as (XserverModule & { xserver_input_key?: WasmCall }) | null;
+      xserver?.xserver_input_key?.(keysym);
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      const runtime = runtimeRef.current;
+      if (!runtime) return;
+      const keysym = keysymFromDomKey(event);
+      if (keysym === null) return;
+      event.preventDefault();
+      const keycode = runtime.server.keymap.keycodeForKeysym(keysym)
+        || (event.key.length === 1 ? runtime.server.keymap.keycodeForKeysym(event.key.charCodeAt(0)) : 0);
+      if (keycode) runtime.server.injectKey(keycode, false);
+    };
+
+    const onContextMenu = (event: Event) => event.preventDefault();
+
+    shell.addEventListener("pointerdown", onPointerDown);
+    shell.addEventListener("pointermove", onPointerMove);
+    shell.addEventListener("pointerup", onPointerUp);
+    shell.addEventListener("pointercancel", onPointerUp);
+    shell.addEventListener("keydown", onKeyDown);
+    shell.addEventListener("keyup", onKeyUp);
+    shell.addEventListener("contextmenu", onContextMenu);
+
+    return () => {
+      shell.removeEventListener("pointerdown", onPointerDown);
+      shell.removeEventListener("pointermove", onPointerMove);
+      shell.removeEventListener("pointerup", onPointerUp);
+      shell.removeEventListener("pointercancel", onPointerUp);
+      shell.removeEventListener("keydown", onKeyDown);
+      shell.removeEventListener("keyup", onKeyUp);
+      shell.removeEventListener("contextmenu", onContextMenu);
+    };
+  }, []);
 
   return (
     <section className="web-desktop-panel" aria-label="Real in-browser X11 server and Aurora WM">
@@ -1070,31 +1368,18 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
         <span className={"desktop-status " + (status.startsWith("running") ? "running" : "")}>{status}</span>
       </div>
       <p className="web-desktop-intro">
-        Session boot launches <strong>Aurora Terminal</strong> + <strong>Aurora Files</strong> from{" "}
-        <a href="https://github.com/ecooxai/aurora-wm" target="_blank" rel="noreferrer">
-          ecooxai/aurora-wm
-        </a>
-        {" "}and <strong>NetSurf</strong> compiled to WASM from{" "}
-        <a href="https://github.com/netsurf-browser/netsurf" target="_blank" rel="noreferrer">
-          netsurf-browser/netsurf
-        </a>
-        {" "}onto the in-tab Xserver.
+        Click the display to focus. <strong>Drag titlebars</strong> to move windows.{" "}
+        <strong>Type</strong> into DuckDuckGo in NetSurf. Session also runs <strong>htop.wasm</strong> in
+        Aurora Terminal.
       </p>
-      <div className="web-display-shell">
-        <canvas
-          ref={canvasRef}
-          className="web-display-canvas"
-          tabIndex={0}
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            handlePointer(event, true);
-          }}
-          onPointerMove={(event) => pointerPosition(event)}
-          onPointerUp={(event) => handlePointer(event, false)}
-          onKeyDown={(event) => handleKey(event, true)}
-          onKeyUp={(event) => handleKey(event, false)}
-          aria-label="X11 screen canvas"
-        />
+      <div
+        ref={shellRef}
+        className="web-display-shell"
+        tabIndex={0}
+        role="application"
+        aria-label="X11 screen · keyboard and mouse input"
+      >
+        <canvas ref={canvasRef} className="web-display-canvas" aria-hidden="true" />
         <canvas
           ref={webGpuCanvasRef}
           className="web-display-canvas web-gpu-display-canvas"
@@ -1107,8 +1392,8 @@ export function WebDesktop({ startSignal, onRunning, workspaceFiles = {} }: WebD
       </div>
       <div className="web-desktop-footer">
         <span><i className="footer-dot" /> {backend}</span>
-        <span>{windows.length} clients · Terminal + NetSurf + Files</span>
-        <span>MapRequest · apps auto-start</span>
+        <span>{windows.length} clients · DDG + htop + Files</span>
+        <span>{inputHint}</span>
       </div>
     </section>
   );

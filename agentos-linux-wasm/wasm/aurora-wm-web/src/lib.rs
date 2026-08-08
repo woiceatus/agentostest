@@ -31,7 +31,7 @@ const FONT_REGULAR: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSan
 const FONT_BOLD: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSans-Bold.ttf");
 const FONT_MONO: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSansMono-Regular.ttf");
 
-static STATUS_RUNNING: &[u8] = b"running - terminal + netsurf + files";
+static STATUS_RUNNING: &[u8] = b"running - drag titlebars - terminal + netsurf + files";
 static STATUS_IDLE: &[u8] = b"idle";
 static SOURCE_URL: &[u8] = b"https://github.com/ecooxai/aurora-wm";
 
@@ -79,6 +79,14 @@ impl Client {
     }
 }
 
+/// Titlebar drag state — mirrors upstream aurora-wm `DragState` / `start_drag`.
+#[derive(Clone, Copy)]
+struct DragState {
+    index: usize,
+    offset_x: i32,
+    offset_y: i32,
+}
+
 #[derive(Clone)]
 struct FileEntry {
     name: String,
@@ -120,6 +128,7 @@ struct State {
     term_lines: Vec<String>,
     term_visible: u32,
     netsurf_visible: u32,
+    drag: Option<DragState>,
     path_buf: [u8; PATH_CAP],
     name_buf: [u8; NAME_CAP],
 }
@@ -145,6 +154,7 @@ impl State {
             term_lines: Vec::new(),
             term_visible: 1,
             netsurf_visible: 1,
+            drag: None,
             path_buf: [0; PATH_CAP],
             name_buf: [0; NAME_CAP],
         }
@@ -239,7 +249,46 @@ fn layout_clients(state: &mut State) {
     for index in 0..WINDOW_COUNT {
         state.clients[index] = place_client(index, w, h, state.dock);
     }
+    state.drag = None;
     state.layout_version = state.layout_version.wrapping_add(1);
+}
+
+fn titlebar_rect(client: Client) -> Rect {
+    Rect {
+        x: client.frame.x,
+        y: client.frame.y,
+        width: client.frame.width,
+        height: TITLEBAR_HEIGHT,
+    }
+}
+
+fn apply_frame_position(state: &mut State, index: usize, frame_x: i32, frame_y: i32) -> bool {
+    if index >= WINDOW_COUNT {
+        return false;
+    }
+    let screen_w = state.width as i32;
+    let dock_y = state.dock.y;
+    let fw = state.clients[index].frame.width;
+    let fh = state.clients[index].frame.height;
+    // Keep enough of the titlebar on-screen to grab again (upstream Aurora behaviour).
+    let min_x = 48 - fw;
+    let max_x = screen_w - 48;
+    let min_y = TOPBAR_HEIGHT;
+    let max_y = (dock_y - TITLEBAR_HEIGHT).max(TOPBAR_HEIGHT);
+    let x = frame_x.clamp(min_x, max_x);
+    let y = frame_y.clamp(min_y, max_y);
+    let client = &mut state.clients[index];
+    if client.frame.x == x && client.frame.y == y {
+        return false;
+    }
+    client.frame.x = x;
+    client.frame.y = y;
+    client.content.x = x;
+    client.content.y = y + TITLEBAR_HEIGHT;
+    client.content.width = fw;
+    client.content.height = (fh - TITLEBAR_HEIGHT).max(1);
+    state.layout_version = state.layout_version.wrapping_add(1);
+    true
 }
 
 fn put_pixel(frame: &mut [u8], width: u32, x: i32, y: i32, color: [u8; 4]) {
@@ -771,11 +820,16 @@ fn draw_terminal_body(
             [245, 248, 252, 255]
         },
     );
+    let tab = if lines.iter().any(|line| line.contains("Tasks:") || line.contains("htop")) {
+        "htop"
+    } else {
+        "shell"
+    };
     draw_text(
         frame,
         width,
         &fonts.bold,
-        "shell",
+        tab,
         content.x + 20,
         content.y + 8,
         12.0,
@@ -1429,6 +1483,7 @@ pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u3
 #[no_mangle]
 pub extern "C" fn aurora_pointer_down(x: i32, y: i32) -> u32 {
     let state = state();
+    state.drag = None;
     // Dock launchers: Term -> terminal, Files -> Aurora Files (like real WM).
     let dock = state.dock;
     if dock.contains(x, y) {
@@ -1456,28 +1511,101 @@ pub extern "C" fn aurora_pointer_down(x: i32, y: i32) -> u32 {
         return state.active + 1;
     }
 
-    for (index, client) in state.clients.iter().enumerate().rev() {
-        if client.mapped == 1 && client.frame.contains(x, y) {
-            if index == FILES_INDEX && state.files_visible == 0 {
-                continue;
-            }
-            state.active = index as u32;
-            if index == FILES_INDEX {
-                // Select file row if click is in the list area.
-                let content = client.content;
-                let list_x = content.x + 132;
-                let list_top = content.y + 90;
-                if x >= list_x && y >= list_top {
-                    let row = (y - list_top) / 42;
-                    if row >= 0 && (row as usize) < state.files.len() {
-                        state.files_selected = row;
-                    }
+    for index in (0..WINDOW_COUNT).rev() {
+        let client = state.clients[index];
+        if client.mapped != 1 || !client.frame.contains(x, y) {
+            continue;
+        }
+        if index == FILES_INDEX && state.files_visible == 0 {
+            continue;
+        }
+        if index == TERM_INDEX && state.term_visible == 0 {
+            continue;
+        }
+        if index == NETSURF_INDEX && state.netsurf_visible == 0 {
+            continue;
+        }
+        state.active = index as u32;
+
+        // Titlebar press → start move drag (upstream handle_frame_click path).
+        if titlebar_rect(client).contains(x, y) {
+            let local_x = x - client.frame.x;
+            if (12..=26).contains(&local_x) {
+                // Close traffic-light: unmap / hide this framed client.
+                match index {
+                    TERM_INDEX => state.term_visible = 0,
+                    FILES_INDEX => state.files_visible = 0,
+                    NETSURF_INDEX => state.netsurf_visible = 0,
+                    _ => {}
                 }
+                state.clients[index].mapped = 0;
+                state.layout_version = state.layout_version.wrapping_add(1);
+                return state.active + 1;
             }
+            state.drag = Some(DragState {
+                index,
+                offset_x: x - client.frame.x,
+                offset_y: y - client.frame.y,
+            });
+            state.layout_version = state.layout_version.wrapping_add(1);
             return state.active + 1;
         }
+
+        if index == FILES_INDEX {
+            // Select file row if click is in the list area.
+            let content = client.content;
+            let list_x = content.x + 132;
+            let list_top = content.y + 90;
+            if x >= list_x && y >= list_top {
+                let row = (y - list_top) / 42;
+                if row >= 0 && (row as usize) < state.files.len() {
+                    state.files_selected = row;
+                }
+            }
+        }
+        return state.active + 1;
     }
     0
+}
+
+/// Pointer motion while a button may be held — updates an active titlebar drag.
+#[no_mangle]
+pub extern "C" fn aurora_pointer_move(x: i32, y: i32) -> u32 {
+    let state = state();
+    let Some(drag) = state.drag else {
+        return 0;
+    };
+    let frame_x = x - drag.offset_x;
+    let frame_y = y - drag.offset_y;
+    if apply_frame_position(state, drag.index, frame_x, frame_y) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_pointer_up() -> u32 {
+    let state = state();
+    if state.drag.take().is_some() {
+        state.layout_version = state.layout_version.wrapping_add(1);
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_is_dragging() -> u32 {
+    u32::from(state().drag.is_some())
+}
+
+#[no_mangle]
+pub extern "C" fn aurora_drag_index() -> i32 {
+    state()
+        .drag
+        .map(|drag| drag.index as i32)
+        .unwrap_or(-1)
 }
 
 #[no_mangle]

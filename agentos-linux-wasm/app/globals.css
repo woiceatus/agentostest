@@ -139,10 +139,10 @@ h2 { margin-bottom: 0; font-size: 23px; font-weight: 600; letter-spacing: -.05em
 .desktop-status { max-width: 60%; padding: 7px 9px; border: 1px solid #2d4844; border-radius: 5px; color: #7f9c91; font: 10px/1.2 var(--font-geist-mono), monospace; text-align: right; }
 .desktop-status.running { border-color: #5c9e78; color: var(--acid); }
 .web-desktop-intro { max-width: 820px; margin: 14px 0 18px; color: #829a91; font-size: 12px; line-height: 1.55; }
-.web-display-shell { position: relative; width: 100%; max-width: 1100px; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #31504b; border-radius: 10px; background: #081014; box-shadow: inset 0 0 0 1px #0b1f22; }
-.web-display-canvas { display: block; width: 100%; height: 100%; outline: none; image-rendering: auto; transition: opacity .18s ease; }
+.web-display-shell { position: relative; width: 100%; max-width: 1100px; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #31504b; border-radius: 10px; background: #081014; box-shadow: inset 0 0 0 1px #0b1f22; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair; outline: none; }
+.web-display-shell:focus, .web-display-shell:focus-visible { box-shadow: inset 0 0 0 2px var(--acid); }
+.web-display-canvas { display: block; width: 100%; height: 100%; outline: none; image-rendering: auto; transition: opacity .18s ease; pointer-events: none; }
 .web-gpu-display-canvas { position: absolute; inset: 0; pointer-events: none; }
-.web-display-canvas:focus { box-shadow: inset 0 0 0 2px var(--acid); }
 .web-window-label { position: absolute; pointer-events: none; border: 1px solid #6a9189; border-radius: 4px; opacity: .72; }
 .web-window-label.active { border-color: var(--acid); opacity: .98; box-shadow: 0 0 0 1px #bcf47655; }
 .web-window-label span { position: absolute; top: 5px; left: 52px; color: #cbe4d4; font: 9px/1 var(--font-geist-mono), monospace; text-transform: uppercase; letter-spacing: .08em; text-shadow: 0 1px #071013; }

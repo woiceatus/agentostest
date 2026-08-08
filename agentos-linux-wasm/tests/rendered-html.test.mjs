@@ -177,6 +177,9 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
 
   assert.equal(typeof auroraExports.aurora_init, "function");
   assert.equal(typeof auroraExports.aurora_pointer_down, "function");
+  assert.equal(typeof auroraExports.aurora_pointer_move, "function");
+  assert.equal(typeof auroraExports.aurora_pointer_up, "function");
+  assert.equal(typeof auroraExports.aurora_is_dragging, "function");
   assert.equal(typeof auroraExports.aurora_window_count, "function");
   assert.equal(typeof auroraExports.aurora_map_request, "function");
   assert.equal(typeof auroraExports.aurora_render, "function");
@@ -192,6 +195,18 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   assert.equal(auroraExports.aurora_netsurf_visible(), 1);
   assert.equal(auroraExports.aurora_active_window(), 1); // NetSurf focused on boot
   assert.ok(auroraExports.aurora_files_count() >= 1);
+
+  // Titlebar drag must move the framed client (real WM move path).
+  const termX = auroraExports.aurora_window_x(0);
+  const termY = auroraExports.aurora_window_y(0);
+  auroraExports.aurora_pointer_down(termX + 80, termY + 8);
+  assert.equal(auroraExports.aurora_is_dragging(), 1);
+  assert.equal(auroraExports.aurora_drag_index(), 0);
+  auroraExports.aurora_pointer_move(termX + 80 - 40, termY + 8 - 20);
+  assert.equal(auroraExports.aurora_window_x(0), termX - 40);
+  assert.equal(auroraExports.aurora_window_y(0), termY - 20);
+  auroraExports.aurora_pointer_up();
+  assert.equal(auroraExports.aurora_is_dragging(), 0);
 
   const netsurfBytes = await readFile(new URL("../public/wasm/netsurf-web.wasm", import.meta.url));
   const netsurf = (await WebAssembly.instantiate(netsurfBytes, {})).instance.exports;
@@ -223,8 +238,22 @@ test("loads the Aurora layout target used by the X11 WM", async () => {
   assert.match(desktopSource, /server\.compose\(\)/);
   assert.match(desktopSource, /aurora-wm-web\.wasm/);
   assert.match(desktopSource, /aurora_map_request/);
+  assert.match(desktopSource, /aurora_pointer_move/);
+  assert.match(desktopSource, /startAuroraHtop/);
+  assert.match(desktopSource, /openDuckDuckGoHome/);
+  assert.match(desktopSource, /setPointerCapture/);
   assert.match(desktopSource, /ecooxai\/aurora-wm/);
   assert.match(desktopSource, /browserNavigator\.gpu/);
+
+  const htopBridge = await readFile(new URL("../app/auroraHtop.ts", import.meta.url), "utf8");
+  assert.match(htopBridge, /htop\.worker/);
+  assert.match(htopBridge, /createAnsiScreen/);
+  assert.match(htopBridge, /pushScreenToAuroraTerm/);
+
+  const browseBridge = await readFile(new URL("../app/netsurfBrowse.ts", import.meta.url), "utf8");
+  assert.match(browseBridge, /html\.duckduckgo\.com/);
+  assert.match(browseBridge, /parseDuckDuckGoResults/);
+  assert.match(browseBridge, /__agentos\/proxy/);
 });
 
 test("keeps the WM alive when WebGPU is unavailable", async () => {
@@ -244,5 +273,5 @@ test("keeps the WM alive when WebGPU is unavailable", async () => {
   assert.match(desktopSource, /device\.pushErrorScope/);
   assert.match(desktopSource, /device\.lost/);
   assert.match(pageSource, /useState\(1\)/);
-  assert.match(pageSource, /<WebDesktop startSignal=\{desktopStartSignal\}/);
+  assert.match(pageSource, /<WebDesktop[\s\S]*startSignal=\{desktopStartSignal\}/);
 });
