@@ -26,14 +26,19 @@ static XConn conn;
 static uint32_t win;
 static uint32_t gc;
 static int ready;
+static int connect_failed;
 static uint32_t xpixels[NS_W * NS_H];
 
 static int ensure_window(int width, int height)
 {
 	if (ready)
 		return 0;
-	if (x_connect(&conn) != 0)
+	if (connect_failed)
 		return -1;
+	if (x_connect(&conn) != 0) {
+		connect_failed = 1;
+		return -1;
+	}
 	if (width <= 0)
 		width = NS_W;
 	if (height <= 0)

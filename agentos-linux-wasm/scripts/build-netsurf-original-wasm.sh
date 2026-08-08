@@ -242,6 +242,7 @@ emcc -O2 \
   -lcurl -lexpat -lutf8proc \
   -sUSE_LIBPNG=1 -sUSE_LIBJPEG=1 -sUSE_ZLIB=1 \
   -sASYNCIFY=1 \
+  -sASYNCIFY_IMPORTS=['agentos_js_http_fetch','emscripten_sleep'] \
   -sASYNCIFY_STACK_SIZE=1048576 \
   -sENVIRONMENT=web \
   -sMODULARIZE=1 \
@@ -254,7 +255,7 @@ emcc -O2 \
   -sSTACK_SIZE=1048576 \
   -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','callMain','FS','HEAPU8','UTF8ToString'] \
   -sEXPORTED_FUNCTIONS=['_main','_malloc','_free'] \
-  -sERROR_ON_UNDEFINED_SYMBOLS=0 \
+  -sERROR_ON_UNDEFINED_SYMBOLS=1 \
   -sFORCE_FILESYSTEM=1 \
   --js-library "${X11APP}/x11_transport.js" \
   --js-library "${X11APP}/netsurf_agentos_fetch.js" \
