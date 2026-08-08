@@ -528,11 +528,16 @@ async function startX11Runtime(
   const managed = new Map<number, { index: number; spec: WindowSpec; gc: number }>();
   let stopped = false;
   let currentLayout = layout;
+  const paintState = { lastPaint: -1, lastActive: aurora.aurora_active_window(), dirty: true };
+  const markDirty = () => {
+    paintState.dirty = true;
+  };
 
   const refreshWindows = () => {
     currentLayout = readLayout(aurora, layout);
     onWindows(currentLayout);
     if (xserver) syncWindowsToXserver(aurora, xserver, currentLayout.length);
+    markDirty();
   };
 
   wm.on("event", (value) => {
@@ -541,6 +546,7 @@ async function startX11Runtime(
       const entry = managed.get(event.wid);
       const index = entry?.index ?? managed.size % Math.max(1, layout.length);
       aurora.aurora_map_request(index, event.width ?? 0, event.height ?? 0);
+      markDirty();
       const frame = {
         x: aurora.aurora_window_x(index),
         y: aurora.aurora_window_y(index),
@@ -616,6 +622,7 @@ async function startX11Runtime(
       if (entry) {
         aurora.aurora_pointer_down(entry.spec.contentX + 8, entry.spec.contentY + 8);
         callX(app, "SetInputFocus", event.wid, 0);
+        markDirty();
         refreshWindows();
       }
     }
@@ -631,21 +638,36 @@ async function startX11Runtime(
         : "failed · desktop modules did not start",
   );
 
+  // Font glyph rasterization is expensive; redraw Aurora chrome on state changes /
+  // ~2.5 Hz for the topbar pulse, not every animation frame.
+  const paintAurora = (now: number, force = false) => {
+    const active = aurora.aurora_active_window();
+    if (!force && !paintState.dirty && active === paintState.lastActive && now - paintState.lastPaint < 400) {
+      return;
+    }
+    paintState.dirty = false;
+    paintState.lastActive = active;
+    paintState.lastPaint = now;
+    aurora.aurora_tick(now);
+    aurora.aurora_render(now);
+    if (xserver) {
+      syncWindowsToXserver(aurora, xserver, layout.length);
+      xserver.xserver_render(now);
+    }
+  };
+  paintAurora(0, true);
+
   const render = () => {
     if (stopped) return;
     const now = Math.round(performance.now()) >>> 0;
-    aurora.aurora_tick(now);
-    aurora.aurora_render(now);
+    paintAurora(now);
     server.compose();
-
     const byteLength = DISPLAY_WIDTH * DISPLAY_HEIGHT * 4;
-    // Prefer the real Aurora chrome framebuffer (wallpaper + topbar + dock + frames).
-    const auroraPixels = new Uint8Array(aurora.memory.buffer, aurora.aurora_frame_ptr(), Math.min(byteLength, aurora.aurora_frame_len()));
-    if (xserver) {
-      syncWindowsToXserver(aurora, xserver, layout.length);
-      // Keep Xserver compositor alive and in sync; Aurora frame is the visual source of truth.
-      xserver.xserver_render(now);
-    }
+    const auroraPixels = new Uint8Array(
+      aurora.memory.buffer,
+      aurora.aurora_frame_ptr(),
+      Math.min(byteLength, aurora.aurora_frame_len()),
+    );
     presenter.present(auroraPixels);
     requestAnimationFrame(render);
   };
@@ -744,6 +766,7 @@ export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
     const { runtime } = position;
     if (pressed) {
       runtime.aurora.aurora_pointer_down(position.x, position.y);
+      runtime.aurora.aurora_render(Math.round(performance.now()) >>> 0);
       runtime.server.injectButton(event.button + 1, true);
     } else {
       runtime.server.injectButton(event.button + 1, false);
@@ -773,12 +796,13 @@ export function WebDesktop({ startSignal, onRunning }: WebDesktopProps) {
         <span className={"desktop-status " + (status.startsWith("running") ? "running" : "")}>{status}</span>
       </div>
       <p className="web-desktop-intro">
-        Aurora WM is compiled from the{" "}
+        Aurora WM is a WASM build of{" "}
         <a href="https://github.com/ecooxai/aurora-wm" target="_blank" rel="noreferrer">
           ecooxai/aurora-wm
-        </a>{" "}
-        browser port to WASM. It owns wallpaper, topbar, dock, framed clients, and MapRequest placement.
-        The companion Xserver WASM compositor plus the in-tab X11 protocol server complete the display path.
+        </a>
+        {" "}using the same Noto fonts + rusttype text path as the Linux WM (titles, topbar, dock, client
+        text). The browser cannot host Unix-socket Xorg clients unchanged, so the X11 wire protocol runs
+        in-tab via the JS X11 server while Aurora WASM owns real WM chrome and MapRequest placement.
       </p>
       <div className="web-display-shell">
         <canvas

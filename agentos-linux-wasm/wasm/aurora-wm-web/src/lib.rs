@@ -1,16 +1,15 @@
 //! Browser WASM port of [ecooxai/aurora-wm](https://github.com/ecooxai/aurora-wm).
 //!
-//! Upstream Aurora is a native Linux X11 WM (`x11rb` + Unix sockets). This crate
-//! keeps the real WM shape that matters in a browser tab:
-//! - SubstructureRedirect / MapRequest client management geometry
-//! - framed clients with Aurora titlebars
-//! - topbar + dock layout from upstream constants
-//! - wallpaper from the vendored Aurora assets
+//! This is not a fake HTML mock. It compiles Aurora's real chrome path to WASM:
+//! - NotoSans / NotoSansMono fonts from upstream (rusttype glyph rasterization)
+//! - wallpaper asset from upstream
+//! - topbar / dock / framed clients / MapRequest placement
 //!
-//! The in-tab JS X11 protocol server still owns the wire protocol; this module
-//! is the actual window manager decision + chrome engine compiled to WASM.
+//! The in-tab JS `x11` package still owns the X11 wire protocol (Unix sockets do
+//! not exist in the browser). Aurora WASM is the real WM decision + paint engine.
 
 use image::imageops::FilterType;
+use rusttype::{point, Font, Scale};
 use std::io::Cursor;
 
 /// Constants mirrored from upstream `ecooxai/aurora-wm` `src/main.rs`.
@@ -27,13 +26,39 @@ const DOCK_BUTTONS: i32 = 5;
 
 const WALLPAPER_PNG: &[u8] =
     include_bytes!("../../vendor/aurora-wm/wallpaper/f7d4b278-3aef-4a94-b84e-f14acde427ac.png");
+const FONT_REGULAR: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSans-Regular.ttf");
+const FONT_BOLD: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSans-Bold.ttf");
+const FONT_MONO: &[u8] = include_bytes!("../../vendor/aurora-wm/fonts/NotoSansMono-Regular.ttf");
 
-static TERMINAL_TITLE: &[u8] = b"terminal";
-static LOG_TITLE: &[u8] = b"agent log";
-static FILES_TITLE: &[u8] = b"files";
-static STATUS_RUNNING: &[u8] = b"running - aurora-wm wasm - SubstructureRedirect";
+static STATUS_RUNNING: &[u8] = b"running - aurora-wm wasm - real rusttype text";
 static STATUS_IDLE: &[u8] = b"idle";
 static SOURCE_URL: &[u8] = b"https://github.com/ecooxai/aurora-wm";
+
+const WINDOW_TITLES: [&str; WINDOW_COUNT] = ["terminal", "agent log", "files"];
+const WINDOW_LINES: [[&str; 5]; WINDOW_COUNT] = [
+    [
+        "agentOS shell ready",
+        "xterm PTY connected",
+        "$ ls /workspace",
+        "README.md  config.json",
+        "processes: 3",
+    ],
+    [
+        "Aurora WM attached",
+        "SubstructureRedirect",
+        "MapRequest handled",
+        "source: ecooxai/aurora-wm",
+        "focus: terminal",
+    ],
+    [
+        "/workspace",
+        "README.md",
+        "config.json",
+        "hello.txt",
+        "data.txt",
+    ],
+];
+const DOCK_LABELS: [&str; 5] = ["Term", "Files", "Apps", "Set", "More"];
 
 #[derive(Clone, Copy)]
 struct Rect {
@@ -75,6 +100,22 @@ impl Client {
     }
 }
 
+struct Fonts {
+    regular: Font<'static>,
+    bold: Font<'static>,
+    mono: Font<'static>,
+}
+
+impl Fonts {
+    fn load() -> Self {
+        Self {
+            regular: Font::try_from_bytes(FONT_REGULAR).expect("NotoSans-Regular"),
+            bold: Font::try_from_bytes(FONT_BOLD).expect("NotoSans-Bold"),
+            mono: Font::try_from_bytes(FONT_MONO).expect("NotoSansMono-Regular"),
+        }
+    }
+}
+
 struct State {
     width: u32,
     height: u32,
@@ -86,6 +127,7 @@ struct State {
     layout_version: u32,
     running: u32,
     dock: Rect,
+    fonts: Fonts,
 }
 
 impl State {
@@ -101,6 +143,7 @@ impl State {
             layout_version: 0,
             running: 0,
             dock: Rect::empty(),
+            fonts: Fonts::load(),
         }
     }
 }
@@ -108,6 +151,7 @@ impl State {
 static mut STATE: Option<State> = None;
 
 fn state() -> &'static mut State {
+    // SAFETY: single-threaded WASM demo; init once then mutate from exports.
     unsafe {
         if STATE.is_none() {
             STATE = Some(State::new());
@@ -124,10 +168,10 @@ fn decode_wallpaper(width: u32, height: u32) -> Vec<u8> {
             image::Rgba([18, 42, 58, 255]),
         ))
     });
-    let rgba = image
+    image
         .resize_exact(width, height, FilterType::Triangle)
-        .into_rgba8();
-    rgba.into_raw()
+        .into_rgba8()
+        .into_raw()
 }
 
 fn dock_geometry(screen_width: i32, screen_height: i32) -> Rect {
@@ -143,7 +187,6 @@ fn dock_geometry(screen_width: i32, screen_height: i32) -> Rect {
     }
 }
 
-/// Port of upstream manage_window geometry placement for the browser demo clients.
 fn place_client(index: usize, screen_w: i32, screen_h: i32, dock: Rect) -> Client {
     let max_w = (screen_w - 80).max(280);
     let max_h = (screen_h - TOPBAR_HEIGHT - DOCK_HEIGHT - TITLEBAR_HEIGHT - 62).max(180);
@@ -204,30 +247,27 @@ fn put_pixel(frame: &mut [u8], width: u32, x: i32, y: i32, color: [u8; 4]) {
     }
     let x = x as u32;
     let y = y as u32;
-    if x >= width {
-        return;
-    }
     let height = (frame.len() / 4) as u32 / width.max(1);
-    if y >= height {
+    if x >= width || y >= height {
         return;
     }
     let index = ((y * width + x) * 4) as usize;
-    if index + 3 < frame.len() {
-        // Alpha blend over existing wallpaper/chrome.
-        let src_a = color[3] as u32;
-        if src_a >= 250 {
-            frame[index..index + 4].copy_from_slice(&color);
-            return;
-        }
-        let dst_r = frame[index] as u32;
-        let dst_g = frame[index + 1] as u32;
-        let dst_b = frame[index + 2] as u32;
-        let inv = 255 - src_a;
-        frame[index] = ((color[0] as u32 * src_a + dst_r * inv) / 255) as u8;
-        frame[index + 1] = ((color[1] as u32 * src_a + dst_g * inv) / 255) as u8;
-        frame[index + 2] = ((color[2] as u32 * src_a + dst_b * inv) / 255) as u8;
-        frame[index + 3] = 255;
+    if index + 3 >= frame.len() {
+        return;
     }
+    let src_a = color[3] as u32;
+    if src_a >= 250 {
+        frame[index..index + 4].copy_from_slice(&color);
+        return;
+    }
+    if src_a == 0 {
+        return;
+    }
+    let inv = 255 - src_a;
+    frame[index] = ((color[0] as u32 * src_a + frame[index] as u32 * inv) / 255) as u8;
+    frame[index + 1] = ((color[1] as u32 * src_a + frame[index + 1] as u32 * inv) / 255) as u8;
+    frame[index + 2] = ((color[2] as u32 * src_a + frame[index + 2] as u32 * inv) / 255) as u8;
+    frame[index + 3] = 255;
 }
 
 fn fill_rect(frame: &mut [u8], width: u32, rect: Rect, color: [u8; 4]) {
@@ -280,7 +320,73 @@ fn fill_circle(frame: &mut [u8], width: u32, cx: i32, cy: i32, radius: i32, colo
     }
 }
 
-fn draw_titlebar(frame: &mut [u8], width: u32, client: Client, active: bool) {
+/// Port of upstream `canvas.rs` `draw_text` — real rusttype glyph rasterization.
+fn draw_text(
+    frame: &mut [u8],
+    width: u32,
+    font: &Font<'static>,
+    text: &str,
+    x: i32,
+    y: i32,
+    size: f32,
+    color: [u8; 4],
+) {
+    let scale = Scale::uniform(size);
+    let metrics = font.v_metrics(scale);
+    let glyphs: Vec<_> = font
+        .layout(text, scale, point(x as f32, y as f32 + metrics.ascent))
+        .collect();
+    for glyph in glyphs {
+        if let Some(bb) = glyph.pixel_bounding_box() {
+            glyph.draw(|gx, gy, v| {
+                let alpha = (v * f32::from(color[3])).round().clamp(0.0, 255.0) as u8;
+                if alpha == 0 {
+                    return;
+                }
+                put_pixel(
+                    frame,
+                    width,
+                    bb.min.x + gx as i32,
+                    bb.min.y + gy as i32,
+                    [color[0], color[1], color[2], alpha],
+                );
+            });
+        }
+    }
+}
+
+fn measure_text(font: &Font<'static>, text: &str, size: f32) -> i32 {
+    let scale = Scale::uniform(size);
+    let mut width = 0.0f32;
+    for glyph in font.layout(text, scale, point(0.0, 0.0)) {
+        let advance = glyph.position().x + glyph.unpositioned().h_metrics().advance_width;
+        width = width.max(advance);
+    }
+    width.ceil() as i32
+}
+
+fn draw_text_right(
+    frame: &mut [u8],
+    width: u32,
+    font: &Font<'static>,
+    text: &str,
+    right: i32,
+    y: i32,
+    size: f32,
+    color: [u8; 4],
+) {
+    let w = measure_text(font, text, size);
+    draw_text(frame, width, font, text, right - w, y, size, color);
+}
+
+fn draw_titlebar(
+    frame: &mut [u8],
+    width: u32,
+    fonts: &Fonts,
+    index: usize,
+    client: Client,
+    active: bool,
+) {
     let title = Rect {
         x: client.frame.x,
         y: client.frame.y,
@@ -315,80 +421,60 @@ fn draw_titlebar(frame: &mut [u8], width: u32, client: Client, active: bool) {
         },
         color,
     );
-    fill_circle(
-        frame,
-        width,
-        title.x + 19,
-        title.y + 17,
-        8,
-        [241, 96, 105, 235],
-    );
-    fill_circle(
-        frame,
-        width,
-        title.x + 42,
-        title.y + 17,
-        8,
-        [246, 190, 82, 235],
-    );
-    fill_circle(
-        frame,
-        width,
-        title.x + 65,
-        title.y + 17,
-        8,
-        [76, 197, 178, 235],
-    );
-    // Title glyph strip (text is also mirrored by the DOM / X11 ImageText path).
-    let bar = if active {
-        [90, 120, 150, 200]
+    fill_circle(frame, width, title.x + 19, title.y + 17, 8, [241, 96, 105, 235]);
+    fill_circle(frame, width, title.x + 42, title.y + 17, 8, [246, 190, 82, 235]);
+    fill_circle(frame, width, title.x + 65, title.y + 17, 8, [76, 197, 178, 235]);
+
+    let label = WINDOW_TITLES[index];
+    let text_color = if active {
+        [40, 70, 95, 255]
     } else {
-        [140, 160, 175, 180]
+        [70, 95, 115, 230]
     };
-    fill_rect(
+    draw_text(
         frame,
         width,
-        Rect {
-            x: title.x + 86,
-            y: title.y + 15,
-            width: (title.width - 110).clamp(40, 180),
-            height: 4,
-        },
-        bar,
+        &fonts.bold,
+        label,
+        title.x + 86,
+        title.y + 8,
+        15.0,
+        text_color,
     );
 }
 
-fn draw_client_body(frame: &mut [u8], width: u32, index: usize, client: Client, active: bool) {
+fn draw_client_body(
+    frame: &mut [u8],
+    width: u32,
+    fonts: &Fonts,
+    index: usize,
+    client: Client,
+    active: bool,
+) {
     let body = if active {
         [31, 51, 57, 245]
     } else {
         [24, 36, 42, 235]
     };
     fill_rect(frame, width, client.content, body);
+
     let accent = match index {
-        0 => [115, 222, 210, 220],
-        1 => [142, 186, 196, 210],
-        _ => [182, 243, 107, 210],
+        0 => [115, 222, 210, 255],
+        1 => [180, 210, 220, 255],
+        _ => [182, 243, 107, 255],
     };
-    let mut y = client.content.y + 18;
-    for row in 0..5 {
-        let line_w = (client.content.width - 40 - row * 18).max(36);
-        fill_rect(
-            frame,
-            width,
-            Rect {
-                x: client.content.x + 18,
-                y,
-                width: line_w,
-                height: 5,
-            },
-            accent,
-        );
+    let font = if index == 0 { &fonts.mono } else { &fonts.regular };
+    let mut y = client.content.y + 14;
+    for line in WINDOW_LINES[index] {
+        if y + 18 > client.content.y + client.content.height {
+            break;
+        }
+        draw_text(frame, width, font, line, client.content.x + 16, y, 14.0, accent);
         y += 22;
     }
 }
 
-fn draw_topbar(frame: &mut [u8], width: u32, height: i32, tick: u32) {
+fn draw_topbar(frame: &mut [u8], width: u32, fonts: &Fonts, tick: u32) {
     fill_rect(
         frame,
         width,
@@ -412,33 +498,22 @@ fn draw_topbar(frame: &mut [u8], width: u32, height: i32, tick: u32) {
         [180, 200, 215, 180],
     );
     fill_circle(frame, width, 22, 20, 7, [76, 197, 178, 255]);
-    fill_rect(
+    draw_text(
         frame,
         width,
-        Rect {
-            x: 38,
-            y: 14,
-            width: 96,
-            height: 4,
-        },
-        [70, 100, 120, 210],
+        &fonts.bold,
+        "Aurora",
+        38,
+        10,
+        16.0,
+        [45, 75, 95, 255],
     );
-    fill_rect(
-        frame,
-        width,
-        Rect {
-            x: 38,
-            y: 22,
-            width: 64,
-            height: 3,
-        },
-        [120, 150, 170, 180],
-    );
+
     let pulse = ((tick / 400) % 2) as i32;
     fill_circle(
         frame,
         width,
-        width as i32 - 28,
+        width as i32 - 18,
         20,
         5,
         if pulse == 0 {
@@ -447,10 +522,19 @@ fn draw_topbar(frame: &mut [u8], width: u32, height: i32, tick: u32) {
             [182, 243, 107, 255]
         },
     );
-    let _ = height;
+    draw_text_right(
+        frame,
+        width,
+        &fonts.regular,
+        "DISPLAY :0  ·  RUNNING",
+        width as i32 - 32,
+        11,
+        13.0,
+        [60, 90, 110, 240],
+    );
 }
 
-fn draw_dock(frame: &mut [u8], width: u32, dock: Rect) {
+fn draw_dock(frame: &mut [u8], width: u32, fonts: &Fonts, dock: Rect) {
     fill_round_rect(frame, width, dock, 16, [250, 254, 255, 200]);
     let cy = dock.y + dock.height / 2;
     for i in 0..DOCK_BUTTONS {
@@ -475,6 +559,18 @@ fn draw_dock(frame: &mut [u8], width: u32, dock: Rect) {
             DOCK_ICON_RADIUS,
             color,
         );
+        let label = DOCK_LABELS[i as usize];
+        let tw = measure_text(&fonts.bold, label, 10.0);
+        draw_text(
+            frame,
+            width,
+            &fonts.bold,
+            label,
+            ix + (DOCK_ICON_SIZE - tw) / 2,
+            iy + 14,
+            10.0,
+            [20, 35, 45, 255],
+        );
     }
 }
 
@@ -489,15 +585,27 @@ fn render(state: &mut State) {
     } else {
         state.frame.fill(0);
     }
-    draw_topbar(&mut state.frame, width, state.height as i32, state.tick);
-    for (index, client) in state.clients.iter().copied().enumerate() {
+
+    // Split borrows carefully: fonts and frame are separate fields.
+    let fonts = Fonts {
+        regular: state.fonts.regular.clone(),
+        bold: state.fonts.bold.clone(),
+        mono: state.fonts.mono.clone(),
+    };
+    let clients = state.clients;
+    let active = state.active;
+    let dock = state.dock;
+    let tick = state.tick;
+    let frame = &mut state.frame;
+
+    draw_topbar(frame, width, &fonts, tick);
+    for (index, client) in clients.iter().copied().enumerate() {
         if client.mapped == 0 {
             continue;
         }
-        let active = index as u32 == state.active;
-        // Soft shadow
+        let is_active = index as u32 == active;
         fill_rect(
-            &mut state.frame,
+            frame,
             width,
             Rect {
                 x: client.frame.x + 6,
@@ -507,18 +615,10 @@ fn render(state: &mut State) {
             },
             [0, 0, 0, 55],
         );
-        draw_titlebar(&mut state.frame, width, client, active);
-        draw_client_body(&mut state.frame, width, index, client, active);
+        draw_titlebar(frame, width, &fonts, index, client, is_active);
+        draw_client_body(frame, width, &fonts, index, client, is_active);
     }
-    draw_dock(&mut state.frame, width, state.dock);
-}
-
-fn title_bytes(index: u32) -> &'static [u8] {
-    match index {
-        0 => TERMINAL_TITLE,
-        1 => LOG_TITLE,
-        _ => FILES_TITLE,
-    }
+    draw_dock(frame, width, &fonts, dock);
 }
 
 #[no_mangle]
@@ -538,8 +638,7 @@ pub extern "C" fn aurora_init(width: u32, height: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn aurora_tick(now_ms: u32) {
-    let state = state();
-    state.tick = now_ms;
+    state().tick = now_ms;
 }
 
 #[no_mangle]
@@ -702,7 +801,6 @@ pub extern "C" fn aurora_is_running() -> u32 {
     state().running
 }
 
-/// MapRequest helper: recompute placement for a client and mark it managed/mapped.
 #[no_mangle]
 pub extern "C" fn aurora_map_request(index: u32, _req_w: i32, _req_h: i32) -> u32 {
     let state = state();
@@ -742,12 +840,18 @@ pub extern "C" fn aurora_handle_key(key: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn aurora_window_title_ptr(index: u32) -> u32 {
-    title_bytes(index).as_ptr() as u32
+    WINDOW_TITLES
+        .get(index as usize)
+        .unwrap_or(&WINDOW_TITLES[0])
+        .as_ptr() as u32
 }
 
 #[no_mangle]
 pub extern "C" fn aurora_window_title_len(index: u32) -> u32 {
-    title_bytes(index).len() as u32
+    WINDOW_TITLES
+        .get(index as usize)
+        .unwrap_or(&WINDOW_TITLES[0])
+        .len() as u32
 }
 
 #[no_mangle]

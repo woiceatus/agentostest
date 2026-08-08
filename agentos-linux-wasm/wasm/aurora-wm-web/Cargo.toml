@@ -1,8 +1,8 @@
 [package]
 name = "aurora-wm-web"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
-description = "Browser WASM port of ecooxai/aurora-wm (https://github.com/ecooxai/aurora-wm)"
+description = "Browser WASM port of ecooxai/aurora-wm with real rusttype font rendering"
 license = "MIT"
 
 [lib]
@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 image = { version = "=0.24.9", default-features = false, features = ["png"] }
+rusttype = "0.9.3"
 
 [profile.release]
 opt-level = "z"
